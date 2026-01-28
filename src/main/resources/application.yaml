@@ -1,4 +1,9 @@
 spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/ai_zero_code_hub
+    username: root
+    password: ${DATABASE_PASSWORD}
   application:
    name: ai-zero-code-hub
 
