@@ -1,12 +1,19 @@
 package com.swu.aiZeroCodeHub.service;
 
+import com.mybatisflex.core.paginate.Page;
 import com.mybatisflex.core.service.IService;
 import com.swu.aiZeroCodeHub.common.vo.BaseResponse;
+import com.swu.aiZeroCodeHub.model.dto.user.UserAddRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserLoginRequest;
+import com.swu.aiZeroCodeHub.model.dto.user.UserQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserRegisterRequest;
+import com.swu.aiZeroCodeHub.model.dto.user.UserUpdateRequest;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.vo.user.LoginUserVO;
+import com.swu.aiZeroCodeHub.model.vo.user.UserVO;
 import jakarta.servlet.http.HttpServletRequest;
+
+import java.util.List;
 
 /**
  * 用户 服务层。
@@ -42,13 +49,16 @@ public interface UserService extends IService<User> {
      */
     BaseResponse<Boolean> userLogout(HttpServletRequest request);
 
+    long addUser(UserAddRequest userAddRequest);
 
+    boolean deleteUser(long id);
 
+    boolean updateUser(UserUpdateRequest userUpdateRequest);
 
+    UserVO getUserVoById(long id);
 
+    List<UserVO> listUserVo(UserQueryRequest userQueryRequest);
 
-
-
+    Page<UserVO> pageUserVo(UserQueryRequest userQueryRequest);
 
 }
-

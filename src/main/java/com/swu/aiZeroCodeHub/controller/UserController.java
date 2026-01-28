@@ -1,10 +1,20 @@
 package com.swu.aiZeroCodeHub.controller;
 
 import com.mybatisflex.core.paginate.Page;
+import com.swu.aiZeroCodeHub.annotation.AuthCheck;
+import com.swu.aiZeroCodeHub.common.ResultUtils;
 import com.swu.aiZeroCodeHub.common.vo.BaseResponse;
+import com.swu.aiZeroCodeHub.constant.UserConstant;
+import com.swu.aiZeroCodeHub.exception.ErrorCode;
+import com.swu.aiZeroCodeHub.exception.ThrowUtils;
+import com.swu.aiZeroCodeHub.model.dto.user.UserAddRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserLoginRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserRegisterRequest;
+import com.swu.aiZeroCodeHub.model.dto.user.UserQueryRequest;
+import com.swu.aiZeroCodeHub.model.dto.user.UserUpdateRequest;
+import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.vo.user.LoginUserVO;
+import com.swu.aiZeroCodeHub.model.vo.user.UserVO;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -14,7 +24,6 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.beans.factory.annotation.Autowired;
-import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.service.UserService;
 import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
@@ -34,34 +43,43 @@ public class UserController {
     /**
      * 保存用户。
      *
-     * @param user 用户
-     * @return {@code true} 保存成功，{@code false} 保存失败
+     * @param userAddRequest 用户
+     * @return 新用户 id
      */
-    @PostMapping("/save")
-    public boolean save(@RequestBody User user) {
-        return userService.save(user);
+    @PostMapping("/add")
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<Long> save(@RequestBody UserAddRequest userAddRequest) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(userAddRequest == null, ErrorCode.PARAM_ERROR);
+        long userId = userService.addUser(userAddRequest);
+        return ResultUtils.success(userId);
     }
 
     /**
      * 根据主键删除用户。
      *
      * @param id 主键
-     * @return {@code true} 删除成功，{@code false} 删除失败
+     * @return 删除结果
      */
     @DeleteMapping("/remove/{id}")
-    public boolean remove(@PathVariable Long id) {
-        return userService.removeById(id);
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<Boolean> remove(@PathVariable Long id) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(id == null || id <= 0, ErrorCode.PARAM_ERROR);
+        boolean result = userService.deleteUser(id);
+        return ResultUtils.success(result);
     }
 
     /**
      * 根据主键更新用户。
      *
-     * @param user 用户
-     * @return {@code true} 更新成功，{@code false} 更新失败
+     * @param userUpdateRequest 用户
+     * @return 更新结果
      */
     @PutMapping("/update")
-    public boolean update(@RequestBody User user) {
-        return userService.updateById(user);
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<Boolean> update(@RequestBody UserUpdateRequest userUpdateRequest) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(userUpdateRequest == null, ErrorCode.PARAM_ERROR);
+        boolean result = userService.updateUser(userUpdateRequest);
+        return ResultUtils.success(result);
     }
 
     /**
@@ -70,8 +88,10 @@ public class UserController {
      * @return 所有数据
      */
     @GetMapping("/list")
-    public List<User> list() {
-        return userService.list();
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<List<UserVO>> list(UserQueryRequest userQueryRequest) {
+        List<UserVO> userVoList = userService.listUserVo(userQueryRequest);
+        return ResultUtils.success(userVoList);
     }
 
     /**
@@ -80,20 +100,33 @@ public class UserController {
      * @param id 用户主键
      * @return 用户详情
      */
-    @GetMapping("/getInfo/{id}")
-    public User getInfo(@PathVariable Long id) {
-        return userService.getById(id);
+    @GetMapping("/getInfo")
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<UserVO> getInfo( Long id) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(id == null || id <= 0, ErrorCode.PARAM_ERROR);
+        UserVO userVo = userService.getUserVoById(id);
+        return ResultUtils.success(userVo);
+    }
+
+    @GetMapping("/get")
+    public BaseResponse<User> getUserById(long id) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(id<=0, ErrorCode.PARAM_ERROR);
+        User user=userService.getById(id);
+        ThrowUtils.throwExceptionByConditionAndErrorCode(user==null, ErrorCode.NOT_FOUND_ERROR);
+        return ResultUtils.success(user);
     }
 
     /**
      * 分页查询用户。
      *
-     * @param page 分页对象
+     * @param userQueryRequest 分页对象
      * @return 分页对象
      */
     @GetMapping("/page")
-    public Page<User> page(Page<User> page) {
-        return userService.page(page);
+    @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
+    public BaseResponse<Page<UserVO>> page(UserQueryRequest userQueryRequest) {
+        Page<UserVO> page = userService.pageUserVo(userQueryRequest);
+        return ResultUtils.success(page);
     }
 
     /**
@@ -113,7 +146,7 @@ public class UserController {
      * @return
      */
     @PostMapping("/login")
-    public BaseResponse<LoginUserVO> login(@RequestBody UserLoginRequest userLoginRequest, @RequestBody HttpServletRequest request) {
+    public BaseResponse<LoginUserVO> login(@RequestBody UserLoginRequest userLoginRequest, HttpServletRequest request) {
         return userService.userLogin(userLoginRequest, request);
     }
 
@@ -123,7 +156,7 @@ public class UserController {
      * @return
      */
     @GetMapping("/get/currentUser")
-    public BaseResponse<LoginUserVO> getCurrentUser(@RequestBody HttpServletRequest request) {
+    public BaseResponse<LoginUserVO> getCurrentUser(HttpServletRequest request) {
         return userService.getCurrentUser(request);
     }
 
@@ -133,7 +166,7 @@ public class UserController {
      * @return
      */
     @PostMapping("/logout")
-    public BaseResponse<Boolean> logout(@RequestBody HttpServletRequest request) {
+    public BaseResponse<Boolean> logout(HttpServletRequest request) {
         return userService.userLogout(request);
     }
 

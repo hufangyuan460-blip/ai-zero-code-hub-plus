@@ -2,6 +2,7 @@ package com.swu.aiZeroCodeHub.service.impl;
 
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
+import com.mybatisflex.core.paginate.Page;
 import com.mybatisflex.core.query.QueryWrapper;
 import com.mybatisflex.spring.service.impl.ServiceImpl;
 import com.swu.aiZeroCodeHub.common.ResultUtils;
@@ -9,8 +10,11 @@ import com.swu.aiZeroCodeHub.common.vo.BaseResponse;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
+import com.swu.aiZeroCodeHub.model.dto.user.UserAddRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserLoginRequest;
+import com.swu.aiZeroCodeHub.model.dto.user.UserQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserRegisterRequest;
+import com.swu.aiZeroCodeHub.model.dto.user.UserUpdateRequest;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.mapper.UserMapper;
 import com.swu.aiZeroCodeHub.model.enums.UserRoleEnum;
@@ -24,6 +28,7 @@ import org.springframework.util.DigestUtils;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static com.swu.aiZeroCodeHub.constant.UserConstant.USER_LOGIN_STATE;
@@ -35,6 +40,17 @@ import static com.swu.aiZeroCodeHub.constant.UserConstant.USER_LOGIN_STATE;
  */
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User>  implements UserService{
+
+    private static final long MAX_PAGE_SIZE = 50;
+
+    private static final Set<String> ALLOWED_SORT_FIELDS = Set.of(
+            "id",
+            "userAccount",
+            "userName",
+            "userRole",
+            "createTime",
+            "updateTime"
+    );
 
     /**
      * 用户注册
@@ -200,6 +216,184 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>  implements U
             return new ArrayList<UserVO>();
         }
         return users.stream().map(u->getUserVo(u)).collect(Collectors.toList());
+    }
+
+    @Override
+    public long addUser(UserAddRequest userAddRequest) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(userAddRequest == null, ErrorCode.PARAM_ERROR);
+        String userAccount = userAddRequest.getUserAccount();
+        String userPassword = userAddRequest.getUserPassword();
+        if (StrUtil.hasBlank(userAccount, userPassword)) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "参数为空");
+        }
+        if (userAccount.length() < 4) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "账户过短");
+        }
+        if (userPassword.length() < 8) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "密码过短");
+        }
+
+        QueryWrapper existsQuery = new QueryWrapper();
+        existsQuery.eq("userAccount", userAccount);
+        long count = this.mapper.selectCountByQuery(existsQuery);
+        if (count > 0) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "账户已存在");
+        }
+
+        User user = new User();
+        user.setUserAccount(userAccount);
+        String userName = userAddRequest.getUserName();
+        if (StrUtil.isBlank(userName)) {
+            userName = "none";
+        }
+        user.setUserName(userName);
+        user.setUserAvatar(userAddRequest.getUserAvatar());
+        user.setUserProfile(userAddRequest.getUserProfile());
+
+        String userRole = userAddRequest.getUserRole();
+        if (StrUtil.isBlank(userRole)) {
+            userRole = UserRoleEnum.USER.getValue();
+        } else if (UserRoleEnum.getEnumByValue(userRole) == null) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "用户角色错误");
+        }
+        user.setUserRole(userRole);
+
+        user.setUserPassword(encryptPassword(userPassword));
+
+        boolean saveResult = this.save(user);
+        if (!saveResult) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "保存失败");
+        }
+        return user.getId();
+    }
+
+    @Override
+    public boolean deleteUser(long id) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(id <= 0, ErrorCode.PARAM_ERROR);
+        return this.removeById(id);
+    }
+
+    @Override
+    public boolean updateUser(UserUpdateRequest userUpdateRequest) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(userUpdateRequest == null, ErrorCode.PARAM_ERROR);
+        Long id = userUpdateRequest.getId();
+        ThrowUtils.throwExceptionByConditionAndErrorCode(id == null || id <= 0, ErrorCode.PARAM_ERROR);
+
+        User oldUser = this.getById(id);
+        if (oldUser == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "用户不存在");
+        }
+
+        if (StrUtil.isNotBlank(userUpdateRequest.getUserName())) {
+            oldUser.setUserName(userUpdateRequest.getUserName());
+        }
+        if (StrUtil.isNotBlank(userUpdateRequest.getUserAvatar())) {
+            oldUser.setUserAvatar(userUpdateRequest.getUserAvatar());
+        }
+        if (StrUtil.isNotBlank(userUpdateRequest.getUserProfile())) {
+            oldUser.setUserProfile(userUpdateRequest.getUserProfile());
+        }
+        if (StrUtil.isNotBlank(userUpdateRequest.getUserRole())) {
+            String userRole = userUpdateRequest.getUserRole();
+            if (UserRoleEnum.getEnumByValue(userRole) == null) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "用户角色错误");
+            }
+            oldUser.setUserRole(userRole);
+        }
+        if (StrUtil.isNotBlank(userUpdateRequest.getUserPassword())) {
+            String userPassword = userUpdateRequest.getUserPassword();
+            if (userPassword.length() < 8) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "密码过短");
+            }
+            oldUser.setUserPassword(encryptPassword(userPassword));
+        }
+
+        return this.updateById(oldUser);
+    }
+
+    @Override
+    public UserVO getUserVoById(long id) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(id <= 0, ErrorCode.PARAM_ERROR);
+        User user = this.getById(id);
+        if (user == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "用户不存在");
+        }
+        return getUserVo(user);
+    }
+
+    @Override
+    public List<UserVO> listUserVo(UserQueryRequest userQueryRequest) {
+        QueryWrapper queryWrapper = buildUserQueryWrapper(userQueryRequest);
+        List<User> userList = this.mapper.selectListByQuery(queryWrapper);
+        return getUserVoList(userList);
+    }
+
+    @Override
+    public Page<UserVO> pageUserVo(UserQueryRequest userQueryRequest) {
+        QueryWrapper queryWrapper = buildUserQueryWrapper(userQueryRequest);
+        long pageNumber = userQueryRequest == null ? 1 : userQueryRequest.getPageNumber();
+        long pageSize = userQueryRequest == null ? 10 : userQueryRequest.getPageSize();
+        if (pageNumber < 1) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "pageNumber 错误");
+        }
+        if (pageSize < 1 || pageSize > MAX_PAGE_SIZE) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "pageSize 错误");
+        }
+
+        Page<User> userPage = this.mapper.paginate(pageNumber, pageSize, queryWrapper);
+        List<UserVO> userVoRecords = getUserVoList(userPage.getRecords());
+
+        Page<UserVO> userVoPage = new Page<>(userPage.getPageNumber(), userPage.getPageSize());
+        userVoPage.setTotalRow(userPage.getTotalRow());
+        userVoPage.setRecords(userVoRecords);
+        return userVoPage;
+    }
+
+    private QueryWrapper buildUserQueryWrapper(UserQueryRequest userQueryRequest) {
+        QueryWrapper queryWrapper = new QueryWrapper();
+        if (userQueryRequest == null) {
+            return queryWrapper;
+        }
+        Long id = userQueryRequest.getId();
+        if (id != null) {
+            if (id <= 0) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "id 错误");
+            }
+            queryWrapper.eq("id", id);
+        }
+        if (StrUtil.isNotBlank(userQueryRequest.getUserAccount())) {
+            queryWrapper.eq("userAccount", userQueryRequest.getUserAccount());
+        }
+        if (StrUtil.isNotBlank(userQueryRequest.getUserName())) {
+            queryWrapper.like("userName", userQueryRequest.getUserName());
+        }
+        if (StrUtil.isNotBlank(userQueryRequest.getUserProfile())) {
+            queryWrapper.like("userProfile", userQueryRequest.getUserProfile());
+        }
+        if (StrUtil.isNotBlank(userQueryRequest.getUserRole())) {
+            String userRole = userQueryRequest.getUserRole();
+            if (UserRoleEnum.getEnumByValue(userRole) == null) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "用户角色错误");
+            }
+            queryWrapper.eq("userRole", userRole);
+        }
+
+        String sortField = userQueryRequest.getSortField();
+        String sortOrder = userQueryRequest.getSortOrder();
+        if (StrUtil.isNotBlank(sortField)) {
+            if (!ALLOWED_SORT_FIELDS.contains(sortField)) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "sortField 错误");
+            }
+            boolean asc = "ascend".equalsIgnoreCase(sortOrder) || "asc".equalsIgnoreCase(sortOrder);
+            boolean desc = "descend".equalsIgnoreCase(sortOrder) || "desc".equalsIgnoreCase(sortOrder) || StrUtil.isBlank(sortOrder);
+            if (!asc && !desc) {
+                throw new BusinessException(ErrorCode.PARAM_ERROR, "sortOrder 错误");
+            }
+            queryWrapper.orderBy(sortField + (asc ? " asc" : " desc"));
+        } else {
+            queryWrapper.orderBy("id desc");
+        }
+        return queryWrapper;
     }
 
 }
