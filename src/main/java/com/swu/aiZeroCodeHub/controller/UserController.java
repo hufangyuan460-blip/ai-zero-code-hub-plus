@@ -12,7 +12,6 @@ import com.swu.aiZeroCodeHub.model.dto.user.UserLoginRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserRegisterRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.user.UserUpdateRequest;
-import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.vo.user.LoginUserVO;
 import com.swu.aiZeroCodeHub.model.vo.user.UserVO;
 import jakarta.servlet.http.HttpServletRequest;
@@ -46,7 +45,7 @@ public class UserController {
      * @param userAddRequest 用户
      * @return 新用户 id
      */
-    @PostMapping("/add")
+    @PostMapping("/save")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
     public BaseResponse<Long> save(@RequestBody UserAddRequest userAddRequest) {
         ThrowUtils.throwExceptionByConditionAndErrorCode(userAddRequest == null, ErrorCode.PARAM_ERROR);
@@ -100,20 +99,12 @@ public class UserController {
      * @param id 用户主键
      * @return 用户详情
      */
-    @GetMapping("/getInfo")
+    @GetMapping("/getInfo/{id}")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
-    public BaseResponse<UserVO> getInfo( Long id) {
+    public BaseResponse<UserVO> getInfo(@PathVariable Long id) {
         ThrowUtils.throwExceptionByConditionAndErrorCode(id == null || id <= 0, ErrorCode.PARAM_ERROR);
         UserVO userVo = userService.getUserVoById(id);
         return ResultUtils.success(userVo);
-    }
-
-    @GetMapping("/get")
-    public BaseResponse<User> getUserById(long id) {
-        ThrowUtils.throwExceptionByConditionAndErrorCode(id<=0, ErrorCode.PARAM_ERROR);
-        User user=userService.getById(id);
-        ThrowUtils.throwExceptionByConditionAndErrorCode(user==null, ErrorCode.NOT_FOUND_ERROR);
-        return ResultUtils.success(user);
     }
 
     /**

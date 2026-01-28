@@ -6,3 +6,14 @@ export const request = axios.create({
   timeout: 30_000,
 })
 
+request.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const message =
+      error?.response?.data?.message ??
+      error?.response?.data?.error ??
+      error?.message ??
+      '请求失败'
+    return Promise.reject(new Error(message))
+  },
+)

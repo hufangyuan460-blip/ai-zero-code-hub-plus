@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import HomeView from '../views/HomeView.vue'
+import { useUserStore } from '@/stores/user'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -10,6 +11,25 @@ const router = createRouter({
       component: HomeView,
     },
     {
+      path: '/user/login',
+      name: 'userLogin',
+      component: () => import('@/pages/user/UserLoginPage.vue'),
+    },
+    {
+      path: '/user/register',
+      name: 'userRegister',
+      component: () => import('@/pages/user/UserRegisterPage.vue'),
+    },
+    {
+      path: '/admin/users',
+      name: 'adminUsers',
+      meta: {
+        requiresLogin: true,
+        requiresAdmin: true,
+      },
+      component: () => import('@/pages/admin/UserManagePage.vue'),
+    },
+    {
       path: '/about',
       name: 'about',
       // route level code-splitting
@@ -18,6 +38,24 @@ const router = createRouter({
       component: () => import('../views/AboutView.vue'),
     },
   ],
+})
+
+router.beforeEach(async (to) => {
+  const userStore = useUserStore()
+  await userStore.init()
+
+  const requiresLogin = Boolean(to.meta?.requiresLogin)
+  const requiresAdmin = Boolean(to.meta?.requiresAdmin)
+
+  if (requiresLogin && !userStore.isLogin) {
+    return {
+      path: '/user/login',
+      query: { redirect: to.fullPath },
+    }
+  }
+  if (requiresAdmin && !userStore.isAdmin) {
+    return { path: '/' }
+  }
 })
 
 export default router

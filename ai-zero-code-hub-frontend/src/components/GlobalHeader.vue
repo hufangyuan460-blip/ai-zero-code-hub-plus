@@ -4,6 +4,7 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { GlobalMenuItem } from '@/config/menu'
 import fallbackLogoUrl from '@/assets/logo.svg'
+import { useUserStore } from '@/stores/user'
 
 type Props = {
   title?: string
@@ -16,14 +17,21 @@ const props = withDefaults(defineProps<Props>(), {
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 
 const logoSrc = ref<string>('/logo.png')
 
 const antMenuItems = computed<MenuProps['items']>(() =>
-  props.menuItems.map((item) => ({
-    key: item.path,
-    label: item.label,
-  })),
+  props.menuItems
+    .filter((item) => {
+      if (item.requiresAdmin && !userStore.isAdmin) return false
+      if (item.requiresLogin && !userStore.isLogin) return false
+      return true
+    })
+    .map((item) => ({
+      key: item.path,
+      label: item.label,
+    })),
 )
 
 const selectedKeys = computed(() => [route.path])
@@ -38,6 +46,19 @@ const onLogoError = () => {
 
 const goHome = () => {
   router.push('/')
+}
+
+const goLogin = () => {
+  router.push('/user/login')
+}
+
+const goRegister = () => {
+  router.push('/user/register')
+}
+
+const onLogout = async () => {
+  await userStore.logout()
+  router.push('/user/login')
 }
 </script>
 
@@ -57,7 +78,14 @@ const goHome = () => {
     />
 
     <div class="right">
-      <a-button type="primary">登录</a-button>
+      <a-space v-if="userStore.isLogin" size="middle">
+        <a-typography-text>{{ userStore.currentUser?.userName }}</a-typography-text>
+        <a-button @click="onLogout">退出</a-button>
+      </a-space>
+      <a-space v-else size="middle">
+        <a-button type="primary" @click="goLogin">登录</a-button>
+        <a-button @click="goRegister">注册</a-button>
+      </a-space>
     </div>
   </div>
 </template>
