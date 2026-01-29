@@ -12,11 +12,11 @@ import java.util.regex.Pattern;
  */
 public class CodeParser {
     private static final Pattern HTML_CODE_PATTERN=
-            Pattern.compile("```html\\s*\\n([\\s\\S]*?)\\s*```",Pattern.CASE_INSENSITIVE);//不区分大小写
+            Pattern.compile("```html\\s*\\R([\\s\\S]*?)\\s*```",Pattern.CASE_INSENSITIVE);//不区分大小写
     private static final Pattern CSS_CODE_PATTERN=
-            Pattern.compile("```css\\s*\\n([\\s\\S]*?)\\s*```",Pattern.CASE_INSENSITIVE);
+            Pattern.compile("```css\\s*\\R([\\s\\S]*?)\\s*```",Pattern.CASE_INSENSITIVE);
     private static final Pattern JS_CODE_PATTERN=
-            Pattern.compile("```(?:js|javascript)\\s*\\n([\\s\\S]*?)```",Pattern.CASE_INSENSITIVE);
+            Pattern.compile("```(?:js|javascript)\\s*\\R([\\s\\S]*?)\\s*```",Pattern.CASE_INSENSITIVE);
 
     /**
      * 提取单文件代码
@@ -25,14 +25,12 @@ public class CodeParser {
      */
     public static HtmlCodeResult parseHtmlCode(String htmlCodeContent) {
         HtmlCodeResult result = new HtmlCodeResult();
-        //提取HTML代码
-        String htmlCode=extractHtmlCode(htmlCodeContent);
-        if (htmlCode!=null&&!htmlCode.trim().isEmpty()) {
-            result.setHtmlCode(htmlCode.trim());
+        String safeContent = htmlCodeContent == null ? "" : htmlCodeContent;
+        String htmlCode = extractHtmlCode(safeContent);
+        if (htmlCode == null || htmlCode.trim().isEmpty()) {
+            htmlCode = safeContent;
         }
-        else {
-            result.setHtmlCode(htmlCode.trim());
-        }
+        result.setHtmlCode(htmlCode == null ? "" : htmlCode.trim());
         return result;
 
     }
@@ -67,7 +65,7 @@ public class CodeParser {
      * @return
      */
     private static String extractHtmlCode(String htmlCodeContent) {
-        Matcher matcher = HTML_CODE_PATTERN.matcher(htmlCodeContent);
+        Matcher matcher = HTML_CODE_PATTERN.matcher(htmlCodeContent == null ? "" : htmlCodeContent);
         if (matcher.find()) {
             return matcher.group(1);
         }
@@ -81,7 +79,7 @@ public class CodeParser {
      * @return
      */
     private static String extractCodeByPattern(String htmlCodeContent,Pattern pattern) {
-        Matcher matcher = pattern.matcher(htmlCodeContent);
+        Matcher matcher = pattern.matcher(htmlCodeContent == null ? "" : htmlCodeContent);
         if (matcher.find()) {
             return matcher.group(1);
         }

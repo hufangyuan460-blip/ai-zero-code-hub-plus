@@ -1,9 +1,12 @@
 package com.swu.aiZeroCodeHub.core;
 
 import com.swu.aiZeroCodeHub.aiService.AiCodeGeneratorService;
+import com.swu.aiZeroCodeHub.core.executor.CodeFileSaverExecutor;
+import com.swu.aiZeroCodeHub.core.executor.CodeParserExecutor;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
+import com.swu.aiZeroCodeHub.model.vo.ai.CodeResult;
 import com.swu.aiZeroCodeHub.model.vo.ai.HtmlCodeResult;
 import com.swu.aiZeroCodeHub.model.vo.ai.MultiFileCodeResult;
 import jakarta.annotation.Resource;
@@ -21,6 +24,10 @@ import java.io.File;
 public class AiCodeGeneratorFacade {
     @Resource
     private AiCodeGeneratorService aiCodeGeneratorService;
+    @Resource
+    private CodeParserExecutor codeParserExecutor;
+    @Resource
+    private CodeFileSaverExecutor codeFileSaverExecutor;
 
     /**
      * 统一入口：根据类型生成并且保存代码
@@ -43,6 +50,20 @@ public class AiCodeGeneratorFacade {
         };
     }
 
+    public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenTypeEnum) {
+        if (codeGenTypeEnum == null) {
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "生成类型为空");
+        }
+        return switch (codeGenTypeEnum) {
+            case HTML -> generateAndSaveHtmlCodeStream(userMessage);
+            case MULTI_FILE -> generateAndSaveMultiFileCodeStream(userMessage);
+            default -> {
+                String errorMessage = "不支持的生成类型" + codeGenTypeEnum.getValue();
+                throw new BusinessException(ErrorCode.SYSTEM_ERROR, errorMessage);
+            }
+        };
+    }
+
     /**
      * 生成HTML模式的代码并且保存(流式)
      * @param userMessage
@@ -60,9 +81,8 @@ public class AiCodeGeneratorFacade {
                     //流式返回完成后保存代码
                     try{
                         String completeHtmlCode = codeBuilder.toString();
-                        HtmlCodeResult htmlCodeResult = CodeParser.parseHtmlCode(completeHtmlCode);
-                        //保存代码到文件
-                        File savedDir=CodeFileSaver.saveHtmlCodeResult(htmlCodeResult);
+                        CodeResult codeResult = codeParserExecutor.parse(completeHtmlCode, CodeGenTypeEnum.HTML);
+                        File savedDir = codeFileSaverExecutor.save(codeResult, CodeGenTypeEnum.HTML);
                         log.info("保存成功，路径为：{}",savedDir.getAbsolutePath());
                     }catch (Exception e){
                         log.error("保存失败：{}",e.getMessage());
@@ -83,8 +103,8 @@ public class AiCodeGeneratorFacade {
                     //流式返回完成后再保存代码
                     try{
                         String completeMultiFileCode = codeBuilder.toString();
-                        MultiFileCodeResult multiFileCodeResult = CodeParser.parseMultiFileCode(completeMultiFileCode);
-                        File savedDir=CodeFileSaver.saveMultiFileCodeResult(multiFileCodeResult);
+                        CodeResult codeResult = codeParserExecutor.parse(completeMultiFileCode, CodeGenTypeEnum.MULTI_FILE);
+                        File savedDir = codeFileSaverExecutor.save(codeResult, CodeGenTypeEnum.MULTI_FILE);
                         log.info("保存成功，路径为：{}",savedDir.getAbsolutePath());
 
                     }catch (Exception e){
@@ -100,7 +120,7 @@ public class AiCodeGeneratorFacade {
      */
     private File generateAndSaveHtmlCode(String userMessage){
         HtmlCodeResult htmlCodeResult = aiCodeGeneratorService.generateHtmlCode(userMessage);
-        return CodeFileSaver.saveHtmlCodeResult(htmlCodeResult);
+        return codeFileSaverExecutor.save(htmlCodeResult, CodeGenTypeEnum.HTML);
     }
 
     /**
@@ -110,6 +130,6 @@ public class AiCodeGeneratorFacade {
      */
     private File generateAndSaveMultiFileCode(String userMessage){
         MultiFileCodeResult multiFileCodeResult = aiCodeGeneratorService.generateMultiFileCode(userMessage);
-        return CodeFileSaver.saveMultiFileCodeResult(multiFileCodeResult);
+        return codeFileSaverExecutor.save(multiFileCodeResult, CodeGenTypeEnum.MULTI_FILE);
     }
 }

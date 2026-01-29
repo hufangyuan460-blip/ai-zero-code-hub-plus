@@ -4,7 +4,7 @@ import dev.langchain4j.model.output.structured.Description;
 import lombok.Data;
 
 @Data
-public class MultiFileCodeResult {
+public class MultiFileCodeResult implements CodeResult {
     @Description("HTML代码")
     private String htmlCode;
     @Description("CSS代码")

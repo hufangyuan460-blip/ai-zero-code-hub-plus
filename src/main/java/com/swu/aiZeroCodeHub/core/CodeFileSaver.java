@@ -33,8 +33,8 @@ public class CodeFileSaver {
     public static File saveMultiFileCodeResult(MultiFileCodeResult multiFileCodeResult) {
          String baseDirPath=buildUniqueDir(CodeGenTypeEnum.MULTI_FILE.getValue());
          writeToFile(baseDirPath,"index.html", multiFileCodeResult.getHtmlCode());
-         writeToFile(baseDirPath,"style.css", multiFileCodeResult.getHtmlCode());
-         writeToFile(baseDirPath,"script.js", multiFileCodeResult.getHtmlCode());
+         writeToFile(baseDirPath,"style.css", multiFileCodeResult.getCssCode());
+         writeToFile(baseDirPath,"script.js", multiFileCodeResult.getJsCode());
          return new File(baseDirPath);
     }
 
@@ -58,6 +58,6 @@ public class CodeFileSaver {
      */
     private static void writeToFile(String dirPath,String filename,String content){
          String filePath=dirPath+File.separator+filename;
-         FileUtil.writeString(content,filePath, StandardCharsets.UTF_8);
+         FileUtil.writeString(content==null?"":content,filePath, StandardCharsets.UTF_8);
     }
 }
