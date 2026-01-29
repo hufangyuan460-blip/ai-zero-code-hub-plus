@@ -31,3 +31,7 @@ build/
 
 ### VS Code ###
 .vscode/
+
+###临时文件###
+tmp/
+.trae/
