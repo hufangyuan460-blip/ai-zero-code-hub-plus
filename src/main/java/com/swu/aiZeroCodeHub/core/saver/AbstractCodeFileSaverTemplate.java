@@ -1,12 +1,10 @@
 package com.swu.aiZeroCodeHub.core.saver;
 
 import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
-import com.swu.aiZeroCodeHub.config.CodeOutputProperties;
+import com.swu.aiZeroCodeHub.constant.AppConstant;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
-import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.model.vo.ai.CodeResult;
 
 import java.io.File;
@@ -18,18 +16,17 @@ import java.util.Map;
  */
 public abstract class AbstractCodeFileSaverTemplate<T extends CodeResult> implements CodeFileSaverTemplate {
 
-    private final CodeOutputProperties codeOutputProperties;
-
-    protected AbstractCodeFileSaverTemplate(CodeOutputProperties codeOutputProperties) {
-        this.codeOutputProperties = codeOutputProperties;
-    }
+    /**
+     * 文件保存根目录常量
+     */
+    protected static final String FILE_SAVE_ROOT_DIR= AppConstant.CODE_OUTPUT_ROOT_DIR;
 
     protected abstract Class<T> getCodeResultClass();
 
     protected abstract Map<String, String> buildFiles(T codeResult);
 
     @Override
-    public final File save(CodeResult codeResult) {
+    public final File save(CodeResult codeResult, Long appId) {
         if (codeResult == null) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "代码结果为空");
         }
@@ -40,7 +37,7 @@ public abstract class AbstractCodeFileSaverTemplate<T extends CodeResult> implem
             throw new BusinessException(ErrorCode.PARAM_ERROR, "代码结果类型不匹配");
         }
 
-        String baseDirPath = buildUniqueDir(getType().getValue());
+        String baseDirPath = buildUniqueDir(getType().getValue(), appId);
         Map<String, String> files = buildFiles(typedResult);
         for (Map.Entry<String, String> entry : files.entrySet()) {
             writeToFile(baseDirPath, entry.getKey(), entry.getValue());
@@ -48,9 +45,12 @@ public abstract class AbstractCodeFileSaverTemplate<T extends CodeResult> implem
         return new File(baseDirPath);
     }
 
-    private String buildUniqueDir(String bizType) {
-        String uniqueDirName = StrUtil.format("{}_{}", bizType, IdUtil.getSnowflakeNextIdStr());
-        String dirPath = codeOutputProperties.getRootDir() + File.separator + uniqueDirName;
+    private String buildUniqueDir(String bizType, Long appId) {
+        if (appId == null || appId <= 0) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "appId 错误");
+        }
+        String uniqueDirName = StrUtil.format("{}_{}", bizType, appId);
+        String dirPath = FILE_SAVE_ROOT_DIR + File.separator + uniqueDirName;
         FileUtil.mkdir(dirPath);
         return dirPath;
     }

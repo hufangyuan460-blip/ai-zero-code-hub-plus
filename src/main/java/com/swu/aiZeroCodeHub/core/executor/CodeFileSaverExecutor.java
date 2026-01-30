@@ -28,7 +28,7 @@ public class CodeFileSaverExecutor {
         this.templateMap = Map.copyOf(map);
     }
 
-    public File save(CodeResult codeResult, CodeGenTypeEnum codeGenTypeEnum) {
+    public File save(CodeResult codeResult, CodeGenTypeEnum codeGenTypeEnum,Long appId) {
         if (codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "生成类型为空");
         }
@@ -36,6 +36,6 @@ public class CodeFileSaverExecutor {
         if (template == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "不支持的保存类型：" + codeGenTypeEnum.getValue());
         }
-        return template.save(codeResult);
+        return template.save(codeResult,appId);
     }
 }

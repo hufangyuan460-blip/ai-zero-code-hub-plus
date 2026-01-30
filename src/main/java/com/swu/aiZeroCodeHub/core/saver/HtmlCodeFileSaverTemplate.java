@@ -1,6 +1,5 @@
 package com.swu.aiZeroCodeHub.core.saver;
 
-import com.swu.aiZeroCodeHub.config.CodeOutputProperties;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.model.vo.ai.HtmlCodeResult;
 import org.springframework.stereotype.Component;
@@ -18,10 +17,6 @@ import java.util.Map;
  */
 @Component
 public class HtmlCodeFileSaverTemplate extends AbstractCodeFileSaverTemplate<HtmlCodeResult> {
-
-    public HtmlCodeFileSaverTemplate(CodeOutputProperties codeOutputProperties) {
-        super(codeOutputProperties);
-    }
 
     @Override
     public CodeGenTypeEnum getType() {
