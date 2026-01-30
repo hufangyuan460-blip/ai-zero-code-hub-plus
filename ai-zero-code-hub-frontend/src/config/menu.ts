@@ -20,6 +20,13 @@ export const GLOBAL_MENU_ITEMS: GlobalMenuItem[] = [
     requiresAdmin: true,
   },
   {
+    key: 'adminApp',
+    label: '应用管理',
+    path: '/admin/app',
+    requiresLogin: true,
+    requiresAdmin: true,
+  },
+  {
     key: 'about',
     label: '关于',
     path: '/about',

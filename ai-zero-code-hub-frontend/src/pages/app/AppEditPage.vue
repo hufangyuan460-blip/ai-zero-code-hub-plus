@@ -1,0 +1,107 @@
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { message } from 'ant-design-vue'
+import { getMyAppInfo, updateMyApp, adminGetAppInfo, adminUpdateApp, type AppVO } from '@/api/app'
+import { useUserStore } from '@/stores/user'
+
+const route = useRoute()
+const router = useRouter()
+const userStore = useUserStore()
+
+const id = route.params.id as string
+const form = ref<any>({})
+const loading = ref(false)
+const submitting = ref(false)
+
+const loadData = async () => {
+  if (!id) return
+  loading.value = true
+  try {
+    // Check if admin
+    let res
+    if (userStore.isAdmin) {
+       res = await adminGetAppInfo(Number(id))
+    } else {
+       res = await getMyAppInfo(Number(id))
+    }
+    
+    if (res.data) {
+      form.value = res.data
+    } else {
+      message.error('加载失败')
+    }
+  } catch (e: any) {
+    message.error('加载失败')
+  } finally {
+    loading.value = false
+  }
+}
+
+const onSubmit = async () => {
+  submitting.value = true
+  try {
+    let res
+    if (userStore.isAdmin) {
+        res = await adminUpdateApp({
+            id: form.value.id,
+            appName: form.value.appName,
+            cover: form.value.cover,
+            priority: form.value.priority
+        })
+    } else {
+        res = await updateMyApp({
+            id: form.value.id,
+            appName: form.value.appName
+        })
+    }
+    
+    if (res.data) {
+      message.success('更新成功')
+      router.back()
+    } else {
+      message.error('更新失败')
+    }
+  } catch (e: any) {
+    message.error('更新失败')
+  } finally {
+    submitting.value = false
+  }
+}
+
+onMounted(() => {
+  loadData()
+})
+</script>
+
+<template>
+  <div class="app-edit">
+    <h2>编辑应用</h2>
+    <a-form :model="form" @finish="onSubmit" layout="vertical" style="max-width: 600px; margin: 0 auto;">
+      <a-form-item label="应用名称" name="appName" :rules="[{ required: true, message: '请输入应用名称' }]">
+        <a-input v-model:value="form.appName" />
+      </a-form-item>
+      
+      <a-form-item label="应用封面" name="cover" v-if="userStore.isAdmin">
+        <a-input v-model:value="form.cover" placeholder="请输入图片 URL" />
+      </a-form-item>
+      
+      <a-form-item label="优先级" name="priority" v-if="userStore.isAdmin">
+        <a-input-number v-model:value="form.priority" />
+      </a-form-item>
+      
+      <a-form-item>
+        <a-button type="primary" html-type="submit" :loading="submitting">保存</a-button>
+        <a-button style="margin-left: 10px" @click="router.back()">取消</a-button>
+      </a-form-item>
+    </a-form>
+  </div>
+</template>
+
+<style scoped>
+.app-edit {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 24px;
+}
+</style>

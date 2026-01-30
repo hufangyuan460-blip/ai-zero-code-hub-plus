@@ -30,6 +30,31 @@ const router = createRouter({
       component: () => import('@/pages/admin/UserManagePage.vue'),
     },
     {
+      path: '/admin/app',
+      name: 'adminApp',
+      meta: {
+        requiresLogin: true,
+        requiresAdmin: true,
+      },
+      component: () => import('@/pages/admin/AppManagePage.vue'),
+    },
+    {
+      path: '/app/generator/:appId',
+      name: 'appGenerator',
+      meta: {
+        requiresLogin: true,
+      },
+      component: () => import('@/pages/app/AppGeneratorPage.vue'),
+    },
+    {
+      path: '/app/edit/:id',
+      name: 'appEdit',
+      meta: {
+        requiresLogin: true,
+      },
+      component: () => import('@/pages/app/AppEditPage.vue'),
+    },
+    {
       path: '/about',
       name: 'about',
       // route level code-splitting
