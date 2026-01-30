@@ -9,7 +9,6 @@ import java.time.LocalDateTime;
 public class LoginUserVO implements Serializable {
     private Long id;
     private String userAccount;
-    private String userPassword;
     //头像
     private String userAvatar;
     //昵称

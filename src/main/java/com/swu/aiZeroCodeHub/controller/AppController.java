@@ -1,5 +1,7 @@
 package com.swu.aiZeroCodeHub.controller;
 
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONUtil;
 import com.mybatisflex.core.paginate.Page;
 import com.swu.aiZeroCodeHub.annotation.AuthCheck;
 import com.swu.aiZeroCodeHub.common.ResultUtils;
@@ -13,18 +15,21 @@ import com.swu.aiZeroCodeHub.model.dto.app.AppCreateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppFeaturedQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppMyQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
+import com.swu.aiZeroCodeHub.model.entity.User;
+import com.swu.aiZeroCodeHub.model.vo.user.LoginUserVO;
+import com.swu.aiZeroCodeHub.service.UserService;
 import org.springframework.beans.factory.annotation.Autowired;
 import com.swu.aiZeroCodeHub.service.AppService;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
 import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * 应用 控制层。
@@ -37,6 +42,9 @@ public class AppController {
 
     @Autowired
     private AppService appService;
+
+    @Autowired
+    private UserService userService;
 
     /**
      * 用户创建应用（必须填写 initPrompt）。
@@ -142,5 +150,59 @@ public class AppController {
     public BaseResponse<Page<AppVO>> adminPage(AppAdminQueryRequest appAdminQueryRequest) {
         Page<AppVO> page = appService.adminPageAppVo(appAdminQueryRequest);
         return ResultUtils.success(page);
+    }
+
+    /**
+     * 应用聊天生成代码(流式)
+     * @param appId 应用ID
+     * @param userMessage 用户信息
+     * @param request 请求对象
+     * @return 生成结果流
+     */
+    @GetMapping(value = "/chat/gen/code",produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public Flux<ServerSentEvent<String>> chatToGenCode(@RequestParam Long appId, @RequestParam String userMessage, HttpServletRequest request) {
+        //参数校验
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null||appId<=0, ErrorCode.PARAM_ERROR,"应用ID无效");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(userMessage), ErrorCode.PARAM_ERROR,"用户提示词不能为空");
+
+        BaseResponse<LoginUserVO> currentUserResponse = userService.getCurrentUser(request);
+        LoginUserVO data = currentUserResponse.getData();
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(data == null || data.getId() == null, ErrorCode.NOT_LOGIN_ERROR, "未登录");
+        User currentUser = new User();
+        currentUser.setId(data.getId());
+        currentUser.setUserRole(data.getUserRole());
+        Flux<String> contentFlux=appService.chatToGenCode(appId, userMessage, currentUser);
+
+        ServerSentEvent<String> doneEvent = ServerSentEvent.<String>builder()
+                .event("done")
+                .data("")
+                .build();
+
+        return contentFlux
+                .map(chunk->{
+                    //将内容包装成JSON对象 1解决前端空格丢失问题
+                    Map<String,String> wrapper=new HashMap<>();
+                    wrapper.put("content", chunk == null ? "" : chunk);
+                    String jsonData = JSONUtil.toJsonStr(wrapper);
+                    return ServerSentEvent.<String>builder()
+                            .data(jsonData)
+                            .build();
+                })
+                .concatWith(Mono.just(
+                        //发送结束事件 2解决前端难以区分后端是正常响应数据还是异常中断问题
+                        doneEvent
+                ))
+                .onErrorResume(e -> {
+                    Map<String, String> errorWrapper = new HashMap<>();
+                    errorWrapper.put("message", "生成失败");
+                    ServerSentEvent<String> errorEvent = ServerSentEvent.<String>builder()
+                            .event("error")
+                            .data(JSONUtil.toJsonStr(errorWrapper))
+                            .build();
+                    return Mono.just(errorEvent).concatWith(Mono.just(doneEvent));
+                });
+
+
     }
 }

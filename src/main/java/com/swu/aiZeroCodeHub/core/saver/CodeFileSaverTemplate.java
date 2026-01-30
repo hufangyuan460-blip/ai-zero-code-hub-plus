@@ -12,5 +12,5 @@ public interface CodeFileSaverTemplate {
 
     CodeGenTypeEnum getType();
 
-    File save(CodeResult codeResult);
+    File save(CodeResult codeResult, Long appId);
 }

@@ -9,8 +9,10 @@ import com.swu.aiZeroCodeHub.model.dto.app.AppFeaturedQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppMyQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
 import com.swu.aiZeroCodeHub.model.entity.App;
+import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
 import jakarta.servlet.http.HttpServletRequest;
+import reactor.core.publisher.Flux;
 
 /**
  * 应用 服务层。
@@ -38,4 +40,15 @@ public interface AppService extends IService<App> {
     AppVO adminGetAppVoById(long id);
 
     Page<AppVO> adminPageAppVo(AppAdminQueryRequest appAdminQueryRequest);
+
+    /**
+     * 调用AI核心业务生成代码
+     * @param appId
+     * @param message
+     * @param loginUser
+     * @return
+     */
+    Flux<String> chatToGenCode(Long appId, String message, User loginUser);
+
+
 }

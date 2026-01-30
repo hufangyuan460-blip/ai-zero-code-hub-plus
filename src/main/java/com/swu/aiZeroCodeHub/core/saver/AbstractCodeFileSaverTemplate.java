@@ -1,7 +1,6 @@
 package com.swu.aiZeroCodeHub.core.saver;
 
 import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
 import com.swu.aiZeroCodeHub.config.CodeOutputProperties;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
@@ -29,7 +28,7 @@ public abstract class AbstractCodeFileSaverTemplate<T extends CodeResult> implem
     protected abstract Map<String, String> buildFiles(T codeResult);
 
     @Override
-    public final File save(CodeResult codeResult) {
+    public final File save(CodeResult codeResult, Long appId) {
         if (codeResult == null) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "代码结果为空");
         }
@@ -40,7 +39,7 @@ public abstract class AbstractCodeFileSaverTemplate<T extends CodeResult> implem
             throw new BusinessException(ErrorCode.PARAM_ERROR, "代码结果类型不匹配");
         }
 
-        String baseDirPath = buildUniqueDir(getType().getValue());
+        String baseDirPath = buildUniqueDir(getType().getValue(), appId);
         Map<String, String> files = buildFiles(typedResult);
         for (Map.Entry<String, String> entry : files.entrySet()) {
             writeToFile(baseDirPath, entry.getKey(), entry.getValue());
@@ -48,8 +47,11 @@ public abstract class AbstractCodeFileSaverTemplate<T extends CodeResult> implem
         return new File(baseDirPath);
     }
 
-    private String buildUniqueDir(String bizType) {
-        String uniqueDirName = StrUtil.format("{}_{}", bizType, IdUtil.getSnowflakeNextIdStr());
+    private String buildUniqueDir(String bizType, Long appId) {
+        if (appId == null || appId <= 0) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "appId 错误");
+        }
+        String uniqueDirName = StrUtil.format("{}_{}", bizType, appId);
         String dirPath = codeOutputProperties.getRootDir() + File.separator + uniqueDirName;
         FileUtil.mkdir(dirPath);
         return dirPath;
