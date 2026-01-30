@@ -10,6 +10,9 @@ import com.swu.aiZeroCodeHub.model.vo.ai.MultiFileCodeResult;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 
+/**
+ * 旧版静态落盘工具（兼容保留）；新代码优先使用 CodeFileSaverExecutor + Template。
+ */
 public class CodeFileSaver {
     private static final String FILE_SAV_ROOT_DIR=System.getProperty("user.dir")+"/tmp/code_output";
 

@@ -8,6 +8,16 @@ import org.springframework.stereotype.Component;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/**
+ * 多文件保存模板。
+ *
+ * <p>落盘文件清单：
+ * <ul>
+ *   <li>index.html ← {@link MultiFileCodeResult#getHtmlCode()}</li>
+ *   <li>style.css  ← {@link MultiFileCodeResult#getCssCode()}</li>
+ *   <li>script.js  ← {@link MultiFileCodeResult#getJsCode()}</li>
+ * </ul>
+ */
 @Component
 public class MultiFileCodeFileSaverTemplate extends AbstractCodeFileSaverTemplate<MultiFileCodeResult> {
 

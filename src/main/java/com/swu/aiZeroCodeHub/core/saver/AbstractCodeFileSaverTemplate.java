@@ -13,6 +13,9 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
+/**
+ * 抽象保存模板（模板方法）：建目录 → 写文件集合 → 返回目录。
+ */
 public abstract class AbstractCodeFileSaverTemplate<T extends CodeResult> implements CodeFileSaverTemplate {
 
     private final CodeOutputProperties codeOutputProperties;

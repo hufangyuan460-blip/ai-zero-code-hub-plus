@@ -7,6 +7,22 @@ import org.springframework.stereotype.Component;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * 多文件解析策略。
+ *
+ * <p>目标：从 AI 输出中分别提取：
+ * <ul>
+ *   <li>```html fenced block → index.html</li>
+ *   <li>```css fenced block → style.css</li>
+ *   <li>```js 或 ```javascript fenced block → script.js</li>
+ * </ul>
+ *
+ * <p>容错策略：
+ * <ul>
+ *   <li>如果未提取到 html，则用原始文本作为 html 兜底（至少保证有可落盘的主文件）</li>
+ *   <li>css/js 未匹配时返回空字符串（对应文件内容为空）</li>
+ * </ul>
+ */
 @Component
 public class MultiFileCodeParser implements CodeParserStrategy<MultiFileCodeResult> {
 
@@ -40,6 +56,13 @@ public class MultiFileCodeParser implements CodeParserStrategy<MultiFileCodeResu
         return result;
     }
 
+    /**
+     * 根据 fenced block 正则提取代码区内容。
+     *
+     * @param content 原始内容
+     * @param pattern fenced block 的正则
+     * @return 代码区内容；未匹配则返回 null
+     */
     private String extractCodeByPattern(String content, Pattern pattern) {
         Matcher matcher = pattern.matcher(content);
         if (matcher.find()) {

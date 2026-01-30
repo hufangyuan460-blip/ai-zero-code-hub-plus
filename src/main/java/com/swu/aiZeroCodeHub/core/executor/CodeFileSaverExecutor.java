@@ -12,6 +12,9 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 保存执行器：按 {@link CodeGenTypeEnum} 选择 {@link CodeFileSaverTemplate} 并落盘。
+ */
 @Service
 public class CodeFileSaverExecutor {
 

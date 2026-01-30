@@ -17,7 +17,9 @@ import reactor.core.publisher.Flux;
 import java.io.File;
 
 /**
- * AI代码生成外观类，组合生成和保存功能
+ * AI 代码生成统一入口（Facade）。
+ *
+ * <p>按 {@link CodeGenTypeEnum} 选择生成方式；流式场景会在结束时解析 raw 文本并落盘。
  */
 @Service
 @Slf4j
@@ -30,10 +32,7 @@ public class AiCodeGeneratorFacade {
     private CodeFileSaverExecutor codeFileSaverExecutor;
 
     /**
-     * 统一入口：根据类型生成并且保存代码
-     * @param userMessage
-     * @param codeGenTypeEnum
-     * @return
+     * 非流式：生成并落盘，返回保存目录。
      */
     public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenTypeEnum){
         if (codeGenTypeEnum==null){
@@ -50,6 +49,9 @@ public class AiCodeGeneratorFacade {
         };
     }
 
+    /**
+     * 流式：生成时返回 chunk，流结束时解析并落盘。
+     */
     public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenTypeEnum) {
         if (codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "生成类型为空");
@@ -74,11 +76,9 @@ public class AiCodeGeneratorFacade {
         StringBuilder codeBuilder = new StringBuilder();
         return fluxResult
                 .doOnNext(chunk->{
-                    //流式代码收集
                     codeBuilder.append(chunk);
                 })
                 .doOnComplete(()->{
-                    //流式返回完成后保存代码
                     try{
                         String completeHtmlCode = codeBuilder.toString();
                         CodeResult codeResult = codeParserExecutor.parse(completeHtmlCode, CodeGenTypeEnum.HTML);
@@ -92,15 +92,12 @@ public class AiCodeGeneratorFacade {
 
     private Flux<String> generateAndSaveMultiFileCodeStream(String userMessage){
         Flux<String> fluxResult = aiCodeGeneratorService.generateMultiFileCodeStream(userMessage);
-        //流式返回生成代码完成后，再保存到本地
         StringBuilder codeBuilder = new StringBuilder();
         return fluxResult
                 .doOnNext(chunk->{
-                    //实时收集代码片段
                     codeBuilder.append(chunk);
                 })
                 .doOnComplete(()->{
-                    //流式返回完成后再保存代码
                     try{
                         String completeMultiFileCode = codeBuilder.toString();
                         CodeResult codeResult = codeParserExecutor.parse(completeMultiFileCode, CodeGenTypeEnum.MULTI_FILE);

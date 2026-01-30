@@ -11,6 +11,9 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 解析执行器：按 {@link CodeGenTypeEnum} 选择 {@link CodeParserStrategy} 并执行解析。
+ */
 @Service
 public class CodeParserExecutor {
 

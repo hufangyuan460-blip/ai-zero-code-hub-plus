@@ -9,7 +9,7 @@ import java.util.Map;
 
 public class MyBatisCodeGenerator {
     //需要生成的表名
-    private static final String[] TABLE_NAMES = {"user"};
+    private static final String[] TABLE_NAMES = {"app"};
 
     public static void main(String[] args) {
         //获取数据源信息
@@ -17,7 +17,7 @@ public class MyBatisCodeGenerator {
         Map<String,Object> dataSourceConfig=dict.getByPath("spring.datasource");
         String url=dataSourceConfig.get("url").toString();
         String userName = dataSourceConfig.get("username").toString();
-        String password = dataSourceConfig.get("password").toString();
+        String password =  "Dyhsqq2011956596";     //dataSourceConfig.get("password").toString();
         //配置数据源
         HikariDataSource dataSource=new HikariDataSource();
         dataSource.setJdbcUrl(url);
