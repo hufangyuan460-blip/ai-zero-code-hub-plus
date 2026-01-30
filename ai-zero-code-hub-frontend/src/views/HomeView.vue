@@ -23,33 +23,37 @@ const selectedType = ref('website')
 const myApps = ref<AppVO[]>([])
 const myTotal = ref(0)
 const myParams = ref<AppMyQueryRequest>({
-  current: 1,
+  pageNumber: 1,
   pageSize: 8,
 })
 
 const featuredApps = ref<AppVO[]>([])
 const featuredTotal = ref(0)
 const featuredParams = ref<AppFeaturedQueryRequest>({
-  current: 1,
+  pageNumber: 1,
   pageSize: 8,
 })
 
 const loading = ref(false)
+const myCurrent = ref(1)
+const featuredCurrent = ref(1)
 
 const loadMyApps = async () => {
   if (!userStore.isLogin) return
+  myParams.value.pageNumber = myCurrent.value
   const res = await listMyAppByPage(myParams.value)
-  if (res.data) {
-    myApps.value = res.data.records
-    myTotal.value = res.data.totalRow
+  if (res) {
+    myApps.value = res.records
+    myTotal.value = res.totalRow
   }
 }
 
 const loadFeaturedApps = async () => {
+  featuredParams.value.pageNumber = featuredCurrent.value
   const res = await listFeaturedAppByPage(featuredParams.value)
-  if (res.data) {
-    featuredApps.value = res.data.records
-    featuredTotal.value = res.data.totalRow
+  if (res) {
+    featuredApps.value = res.records
+    featuredTotal.value = res.totalRow
   }
 }
 
@@ -65,16 +69,15 @@ const onSearch = async () => {
   }
   loading.value = true
   try {
-    const res = await createApp({
-      initPrompt: prompt.value,
-      codeGenType: selectedType.value,
+    const selectedLabel = appTypes.find(t => t.key === selectedType.value)?.label || '网站'
+    const fullPrompt = `${prompt.value}，应用类型：${selectedLabel}`
+    
+    const appId = await createApp({
+      initPrompt: fullPrompt,
+      codeGenType: 'html', // Backend only supports 'html' or 'multi_file'
     })
-    if (res.code === 0 && res.data) {
-      message.success('创建成功，正在跳转...')
-      router.push(`/app/generator/${res.data}?initPrompt=${encodeURIComponent(prompt.value)}`)
-    } else {
-      message.error(res.message || '创建失败')
-    }
+    message.success('创建成功，正在跳转...')
+    router.push(`/app/generator/${appId}?initPrompt=${encodeURIComponent(fullPrompt)}`)
   } catch (e: any) {
     message.error(e.message || '创建失败')
   } finally {
@@ -91,13 +94,9 @@ const doDelete = (item: AppVO) => {
     title: '确认删除',
     content: `确定要删除应用 ${item.appName} 吗？`,
     onOk: async () => {
-      const res = await removeMyApp(item.id)
-      if (res.data) {
-        message.success('删除成功')
-        loadMyApps()
-      } else {
-        message.error('删除失败')
-      }
+      await removeMyApp(item.id)
+      message.success('删除成功')
+      loadMyApps()
     }
   })
 }
@@ -110,12 +109,12 @@ onMounted(() => {
 })
 
 const onMyPageChange = (page: number) => {
-  myParams.value.current = page
+  myCurrent.value = page
   loadMyApps()
 }
 
 const onFeaturedPageChange = (page: number) => {
-  featuredParams.value.current = page
+  featuredCurrent.value = page
   loadFeaturedApps()
 }
 
@@ -185,7 +184,7 @@ const appTypes = [
       </a-list>
       <div class="pagination-wrapper" v-if="myTotal > 0">
         <a-pagination
-          v-model:current="myParams.current"
+          v-model:current="myCurrent"
           :total="myTotal"
           :pageSize="myParams.pageSize"
           @change="onMyPageChange"
@@ -218,7 +217,7 @@ const appTypes = [
       </a-list>
       <div class="pagination-wrapper" v-if="featuredTotal > 0">
         <a-pagination
-          v-model:current="featuredParams.current"
+          v-model:current="featuredCurrent"
           :total="featuredTotal"
           :pageSize="featuredParams.pageSize"
           @change="onFeaturedPageChange"

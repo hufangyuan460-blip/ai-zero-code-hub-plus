@@ -34,36 +34,36 @@ public class AiCodeGeneratorFacade {
     /**
      * 非流式：生成并落盘，返回保存目录。
      */
-//    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenTypeEnum,Long appId){
-//        if (codeGenTypeEnum==null){
-//            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"生成类型为空");
-//        }
-//        return switch (codeGenTypeEnum){
-//            case HTML -> generateAndSaveHtmlCode(userMessage,appId);
-//            case MULTI_FILE -> generateAndSaveMultiFileCode(userMessage,appId);
-//            default -> {
-//                String errorMessage="不支持的生成类型" + codeGenTypeEnum.getValue();
-//                throw new BusinessException(ErrorCode.SYSTEM_ERROR,errorMessage);
-//            }
-//
-//        };
-//    }
+    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenTypeEnum,Long appId){
+        if (codeGenTypeEnum==null){
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"生成类型为空");
+        }
+        if (codeGenTypeEnum == CodeGenTypeEnum.HTML) {
+            return generateAndSaveHtmlCode(userMessage, appId);
+        } else if (codeGenTypeEnum == CodeGenTypeEnum.MULTI_FILE) {
+            return generateAndSaveMultiFileCode(userMessage, appId);
+        } else {
+            String errorMessage="不支持的生成类型" + codeGenTypeEnum.getValue();
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,errorMessage);
+        }
+    }
 
     /**
      * 流式：生成时返回 chunk，流结束时解析并落盘。
      */
-    public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenTypeEnum,Long appId) {
+    public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenTypeEnum, Long appId) {
         if (codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "生成类型为空");
         }
-        return switch (codeGenTypeEnum) {
-            case HTML -> generateAndSaveHtmlCodeStream(userMessage,appId);
-            case MULTI_FILE -> generateAndSaveMultiFileCodeStream(userMessage,appId);
-            default -> {
-                String errorMessage = "不支持的生成类型" + codeGenTypeEnum.getValue();
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR, errorMessage);
-            }
-        };
+        // Use if-else instead of switch expression to avoid anonymous inner class issues in some environments
+        if (codeGenTypeEnum == CodeGenTypeEnum.HTML) {
+            return generateAndSaveHtmlCodeStream(userMessage, appId);
+        } else if (codeGenTypeEnum == CodeGenTypeEnum.MULTI_FILE) {
+            return generateAndSaveMultiFileCodeStream(userMessage, appId);
+        } else {
+            String errorMessage = "不支持的生成类型" + codeGenTypeEnum.getValue();
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, errorMessage);
+        }
     }
 
     /**

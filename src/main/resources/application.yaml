@@ -29,7 +29,7 @@ langchain4j:
   open-ai:
     chat-model:
       base-url: https://api.deepseek.com
-      api-key: ${DEEPSEEK_API_KEY}
+      api-key: ${DEEPSEEK_API_KEY:sk-test}
       model-name: deepseek-chat
       log-responses: true
       log-requests: true
@@ -40,7 +40,7 @@ langchain4j:
 #    流式输出
     streaming-chat-model:
         base-url: https://api.deepseek.com
-        api-key: ${DEEPSEEK_API_KEY}
+        api-key: ${DEEPSEEK_API_KEY:sk-test}
         model-name: deepseek-chat
         log-responses: true
         log-requests: true

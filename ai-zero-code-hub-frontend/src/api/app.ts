@@ -1,9 +1,10 @@
 import { request } from './request'
+import { unwrapBaseResponse } from './baseResponse'
 import type { Page } from './types'
 
 // Types
 export interface AppVO {
-  id: number
+  id: string
   appName: string
   cover?: string
   initPrompt?: string
@@ -25,12 +26,12 @@ export interface AppCreateRequest {
 }
 
 export interface AppUpdateMyRequest {
-  id: number
+  id: string
   appName?: string
 }
 
 export interface AppMyQueryRequest {
-  current?: number
+  pageNumber?: number
   pageSize?: number
   appName?: string
   sortField?: string
@@ -38,31 +39,35 @@ export interface AppMyQueryRequest {
 }
 
 export interface AppFeaturedQueryRequest {
-  current?: number
+  pageNumber?: number
   pageSize?: number
   appName?: string
 }
 
 export interface AppAdminUpdateRequest {
-  id: number
+  id: string
   appName?: string
   cover?: string
   priority?: number
 }
 
 export interface AppAdminQueryRequest {
-  current?: number
+  pageNumber?: number
   pageSize?: number
+  id?: string
   appName?: string
-  appStatus?: number
-  appType?: number
+  cover?: string
+  initPrompt?: string
+  codeGenType?: string
+  deployKey?: string
+  priority?: number
   userId?: number
   sortField?: string
   sortOrder?: string
 }
 
 export interface AppDeployRequest {
-  appId: number
+  appId: string
 }
 
 // API Methods
@@ -70,76 +75,89 @@ export interface AppDeployRequest {
 /**
  * Create App
  */
-export const createApp = (data: AppCreateRequest) => {
-  return request.post<any, number>('/app/create', data)
+export const createApp = async (data: AppCreateRequest) => {
+  const res = await request.post<any>('/app/create', data)
+  // json-bigint will parse the response, so we need to handle the potential string/BigInt/number type
+  // Since we use storeAsString: true, it should be a string
+  return unwrapBaseResponse<string>(res)
 }
 
 /**
  * Update My App
  */
-export const updateMyApp = (data: AppUpdateMyRequest) => {
-  return request.put<any, boolean>('/app/my/update', data)
+export const updateMyApp = async (data: AppUpdateMyRequest) => {
+  const res = await request.put<any>('/app/my/update', data)
+  return unwrapBaseResponse<boolean>(res)
 }
 
 /**
  * Remove My App
  */
-export const removeMyApp = (id: number) => {
-  return request.delete<any, boolean>(`/app/my/remove/${id}`)
+export const removeMyApp = async (id: string) => {
+  const res = await request.delete<any>(`/app/my/remove/${id}`)
+  return unwrapBaseResponse<boolean>(res)
 }
 
 /**
  * Get My App Info
  */
-export const getMyAppInfo = (id: number) => {
-  return request.get<any, AppVO>(`/app/my/getInfo/${id}`)
+export const getMyAppInfo = async (id: string) => {
+  const res = await request.get<any>(`/app/my/getInfo/${id}`)
+  return unwrapBaseResponse<AppVO>(res)
 }
 
 /**
  * Page My Apps
  */
-export const listMyAppByPage = (params: AppMyQueryRequest) => {
-  return request.get<any, Page<AppVO>>('/app/my/page', { params })
+export const listMyAppByPage = async (params: AppMyQueryRequest) => {
+  const res = await request.get<any>('/app/my/page', { params })
+  return unwrapBaseResponse<Page<AppVO>>(res)
 }
 
 /**
  * Page Featured Apps
  */
-export const listFeaturedAppByPage = (params: AppFeaturedQueryRequest) => {
-  return request.get<any, Page<AppVO>>('/app/featured/page', { params })
+export const listFeaturedAppByPage = async (params: AppFeaturedQueryRequest) => {
+  const res = await request.get<any>('/app/featured/page', { params })
+  return unwrapBaseResponse<Page<AppVO>>(res)
 }
 
 /**
  * Admin Remove App
  */
-export const adminRemoveApp = (id: number) => {
-  return request.delete<any, boolean>(`/app/admin/remove/${id}`)
+export const adminRemoveApp = async (id: string) => {
+  const res = await request.delete<any>(`/app/admin/remove/${id}`)
+  return unwrapBaseResponse<boolean>(res)
 }
 
 /**
  * Admin Update App
  */
-export const adminUpdateApp = (data: AppAdminUpdateRequest) => {
-  return request.put<any, boolean>('/app/admin/update', data)
+export const adminUpdateApp = async (data: AppAdminUpdateRequest) => {
+  const res = await request.put<any>('/app/admin/update', data)
+  return unwrapBaseResponse<boolean>(res)
 }
 
 /**
  * Admin Get App Info
  */
-export const adminGetAppInfo = (id: number) => {
-  return request.get<any, AppVO>(`/app/admin/getInfo/${id}`)
+export const adminGetAppInfo = async (id: string) => {
+  const res = await request.get<any>(`/app/admin/getInfo/${id}`)
+  return unwrapBaseResponse<AppVO>(res)
 }
 
 /**
  * Admin Page Apps
  */
-export const adminListAppByPage = (params: AppAdminQueryRequest) => {
-  return request.get<any, Page<AppVO>>('/app/admin/page', { params })
+export const adminListAppByPage = async (params: AppAdminQueryRequest) => {
+  const res = await request.get<any>('/app/admin/page', { params })
+  return unwrapBaseResponse<Page<AppVO>>(res)
 }
 
 /**
  * Deploy App
  */
-export const deployApp = (data: AppDeployRequest) => {
-  return request.post<any, string>('/app/deploy', data)
+export const deployApp = async (data: AppDeployRequest) => {
+  const res = await request.post<any>('/app/deploy', data)
+  return unwrapBaseResponse<string>(res)
 }

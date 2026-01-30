@@ -21,13 +21,13 @@ const loadData = async () => {
     // Check if admin
     let res
     if (userStore.isAdmin) {
-       res = await adminGetAppInfo(Number(id))
+       res = await adminGetAppInfo(id)
     } else {
-       res = await getMyAppInfo(Number(id))
+       res = await getMyAppInfo(id)
     }
     
-    if (res.data) {
-      form.value = res.data
+    if (res) {
+      form.value = res
     } else {
       message.error('加载失败')
     }
@@ -43,25 +43,21 @@ const onSubmit = async () => {
   try {
     let res
     if (userStore.isAdmin) {
-        res = await adminUpdateApp({
+        await adminUpdateApp({
             id: form.value.id,
             appName: form.value.appName,
             cover: form.value.cover,
             priority: form.value.priority
         })
     } else {
-        res = await updateMyApp({
+        await updateMyApp({
             id: form.value.id,
             appName: form.value.appName
         })
     }
     
-    if (res.data) {
-      message.success('更新成功')
-      router.back()
-    } else {
-      message.error('更新失败')
-    }
+    message.success('更新成功')
+    router.back()
   } catch (e: any) {
     message.error('更新失败')
   } finally {

@@ -37,9 +37,9 @@ const loadAppInfo = async () => {
   if (!appId) return
   loading.value = true
   try {
-    const res = await getMyAppInfo(Number(appId))
-    if (res.data) {
-      app.value = res.data
+    const res = await getMyAppInfo(appId)
+    if (res) {
+      app.value = res
     } else {
       message.error('应用不存在')
     }
@@ -75,11 +75,17 @@ const onGenerate = async (prompt: string) => {
       const data = JSON.parse(event.data)
       if (data.content) {
         messages.value[aiMsgIndex].content += data.content
-        scrollToBottom()
+      } else {
+        // If parsed data is not the expected object structure, treat raw data as content
+        // This handles cases where data might be a JSON string or other format
+        messages.value[aiMsgIndex].content += event.data
       }
     } catch (e) {
-      // Ignore parse error
+      // If parsing fails (e.g., plain text), treat raw data as content
+      // Note: SSE handles newlines in data automatically
+      messages.value[aiMsgIndex].content += event.data
     }
+    scrollToBottom()
   }
 
   eventSource.addEventListener('done', () => {
@@ -125,10 +131,10 @@ const handleDeploy = async () => {
   if (!app.value) return
   deploying.value = true
   try {
-    const res = await deployApp({ appId: app.value.id })
-    if (res.data) {
+    const deployUrl = await deployApp({ appId: app.value.id })
+    if (deployUrl) {
       message.success('部署成功')
-      window.open(res.data, '_blank')
+      window.open(deployUrl, '_blank')
     }
   } catch (e: any) {
     message.error('部署失败')

@@ -10,9 +10,11 @@ const apps = ref<AppVO[]>([])
 const total = ref(0)
 const loading = ref(false)
 const searchParams = ref<AppAdminQueryRequest>({
-  current: 1,
+  pageNumber: 1,
   pageSize: 10,
 })
+
+const current = ref(1)
 
 const columns = [
   { title: 'ID', dataIndex: 'id', width: 60 },
@@ -29,10 +31,11 @@ const columns = [
 const loadData = async () => {
   loading.value = true
   try {
+    searchParams.value.pageNumber = current.value
     const res = await adminListAppByPage(searchParams.value)
-    if (res.data) {
-      apps.value = res.data.records
-      total.value = res.data.totalRow
+    if (res) {
+      apps.value = res.records
+      total.value = res.totalRow
     }
   } catch (e: any) {
     message.error('加载失败')
@@ -42,12 +45,12 @@ const loadData = async () => {
 }
 
 const onSearch = () => {
-  searchParams.value.current = 1
+  current.value = 1
   loadData()
 }
 
 const onPageChange = (page: number, pageSize: number) => {
-  searchParams.value.current = page
+  current.value = page
   searchParams.value.pageSize = pageSize
   loadData()
 }
@@ -57,13 +60,9 @@ const doDelete = async (record: AppVO) => {
     title: '确认删除',
     content: `确定要删除应用 ${record.appName} 吗？`,
     onOk: async () => {
-      const res = await adminRemoveApp(record.id)
-      if (res.data) {
-        message.success('删除成功')
-        loadData()
-      } else {
-        message.error('删除失败')
-      }
+      await adminRemoveApp(record.id)
+      message.success('删除成功')
+      loadData()
     }
   })
 }
@@ -75,11 +74,9 @@ const doEdit = (record: AppVO) => {
 const doSetFeatured = async (record: AppVO) => {
     // Set priority to 99
     try {
-        const res = await adminUpdateApp({ id: record.id, priority: 99 })
-        if (res.data) {
-            message.success('已设为精选')
-            loadData()
-        }
+        await adminUpdateApp({ id: record.id, priority: 99 })
+        message.success('已设为精选')
+        loadData()
     } catch (e: any) {
         message.error('设置失败')
     }
@@ -105,7 +102,7 @@ onMounted(() => {
       :columns="columns"
       :dataSource="apps"
       :pagination="{
-        current: searchParams.current,
+        current: current,
         pageSize: searchParams.pageSize,
         total: total,
         onChange: onPageChange

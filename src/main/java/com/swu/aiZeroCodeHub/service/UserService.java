@@ -36,6 +36,13 @@ public interface UserService extends IService<User> {
     BaseResponse<LoginUserVO> userLogin(UserLoginRequest userLoginRequest, HttpServletRequest request);
 
     /**
+     * 获取当前登陆用户（内部调用，返回实体）
+     * @param request
+     * @return
+     */
+    User getLoginUser(HttpServletRequest request);
+
+    /**
      * 获取当前登陆用户
      * @param request
      * @return

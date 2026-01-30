@@ -157,6 +157,28 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User>  implements U
 
 
     /**
+     * 获取当前登陆用户（内部调用，返回实体）
+     * @param request
+     * @return
+     */
+    @Override
+    public User getLoginUser(HttpServletRequest request) {
+        Object objectUser = request.getSession().getAttribute(USER_LOGIN_STATE);
+        if (objectUser == null) {
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+        User user = (User) objectUser;
+        if (user == null || user.getId() == null) {
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+        User currentUser = this.getById(user.getId());
+        if (currentUser == null) {
+            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
+        }
+        return currentUser;
+    }
+
+    /**
      * 获取当前登陆用户
      * @param request
      * @return
