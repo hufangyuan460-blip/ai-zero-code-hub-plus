@@ -54,7 +54,7 @@ public class ChatHistory implements Serializable {
     /**
      * 消息内容
      */
-    @Column("content")
+    @Column("message")
     private String content;
 
     /**
