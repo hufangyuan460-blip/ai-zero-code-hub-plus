@@ -5,6 +5,7 @@ import com.swu.aiZeroCodeHub.core.AiCodeGeneratorFacade;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.model.vo.ai.HtmlCodeResult;
 import com.swu.aiZeroCodeHub.model.vo.ai.MultiFileCodeResult;
+import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import jakarta.annotation.Resource;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -23,6 +24,9 @@ import static org.mockito.Mockito.when;
 class AiZeroCodeHubApplicationTests {
     @MockBean
     private AiCodeGeneratorService aiCodeGeneratorService;
+    @MockBean
+    private ChatHistoryService chatHistoryService;
+
     @Resource
     private AiCodeGeneratorFacade aiCodeGeneratorFacade;
 
@@ -57,7 +61,20 @@ class AiZeroCodeHubApplicationTests {
         Assertions.assertNotNull(file);
     }
 
-
-
+    @Test
+    void chatStream() {
+        // 模拟普通对话流
+        when(aiCodeGeneratorService.chatStream(anyString())).thenReturn(reactor.core.publisher.Flux.just("你好", "，", "有什么", "可以", "帮", "你", "？"));
+        
+        // 调用 chatStream 逻辑 (通过 generateAndSaveCodeStream 传入 CHAT 类型)
+        // 注意：这里不会返回 File，因为 CHAT 模式不保存文件，只保存历史记录
+        // 我们主要验证调用是否成功不报错
+        var flux = aiCodeGeneratorFacade.generateAndSaveCodeStream("你好", CodeGenTypeEnum.CHAT, 1L, new com.swu.aiZeroCodeHub.model.entity.User());
+        
+        StringBuilder sb = new StringBuilder();
+        flux.toIterable().forEach(sb::append);
+        
+        Assertions.assertEquals("你好，有什么可以帮你？", sb.toString());
+    }
 
 }

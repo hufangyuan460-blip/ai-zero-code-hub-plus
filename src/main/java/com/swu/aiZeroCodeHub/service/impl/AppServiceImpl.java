@@ -25,6 +25,7 @@ import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
 import com.swu.aiZeroCodeHub.service.AppService;
+import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import com.swu.aiZeroCodeHub.service.UserService;
 import jakarta.annotation.Resource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,12 +39,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryAddRequest;
+import com.swu.aiZeroCodeHub.model.enums.MessageTypeEnum;
+import lombok.extern.slf4j.Slf4j;
+
 /**
  * 应用 服务层实现。
  *
  * @author hxyz61
  */
 @Service
+@Slf4j
 public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppService{
 
     private static final int MAX_USER_PAGE_SIZE = 20;
@@ -58,6 +64,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
 
     @Resource
     private UserService userService;
+    @Resource
+    private ChatHistoryService chatHistoryService;
     @Autowired
     private AiCodeGeneratorFacade aiCodeGeneratorFacade;
 
@@ -127,6 +135,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         if (!loginUser.getId().equals(oldApp.getUserId())) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
         }
+        
+        // 级联删除对话历史
+        chatHistoryService.deleteChatHistoryByAppId(id);
+        
         return this.removeById(id);
     }
 
@@ -137,7 +149,16 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
 
         App app = this.getById(id);
         ThrowUtils.throwExceptionByConditionAndErrorCode(app == null, ErrorCode.NOT_FOUND_ERROR);
-        if (!loginUser.getId().equals(app.getUserId())) {
+        
+        // Allow access if:
+        // 1. User is the creator
+        // 2. User is admin
+        // 3. App is featured (priority > 0) - Publicly viewable
+        boolean isCreator = loginUser.getId().equals(app.getUserId());
+        boolean isAdmin = "admin".equals(loginUser.getUserRole());
+        boolean isFeatured = app.getPriority() != null && app.getPriority() > 0;
+        
+        if (!isCreator && !isAdmin && !isFeatured) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR);
         }
         return getAppVo(app);
@@ -193,6 +214,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         ThrowUtils.throwExceptionByConditionAndErrorCode(id <= 0, ErrorCode.PARAM_ERROR);
         App oldApp = this.getById(id);
         ThrowUtils.throwExceptionByConditionAndErrorCode(oldApp == null, ErrorCode.NOT_FOUND_ERROR);
+        
+        // 级联删除对话历史
+        chatHistoryService.deleteChatHistoryByAppId(id);
+        
         return this.removeById(id);
     }
 
@@ -377,7 +402,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
      * @return
      */
     @Override
-    public Flux<String> chatToGenCode(Long appId, String message, User loginUser) {
+    public Flux<String> chatToGenCode(Long appId, String message, String codeGenType, User loginUser) {
         //参数校验
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId==null||appId<=0,ErrorCode.PARAM_ERROR,"应用ID不能为空");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(message),ErrorCode.PARAM_ERROR,"用户提示词不能为空");
@@ -389,14 +414,53 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR,"无权限访问该应用");
         }
 
-        //获取应用代码生成类型
-        String codeGenType = app.getCodeGenType();
-        CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(codeGenType);
+        //获取应用代码生成类型：优先使用参数传入的类型，如果为空则使用应用配置的类型
+        String type = StrUtil.isNotBlank(codeGenType) ? codeGenType : app.getCodeGenType();
+        CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(type);
         if (codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR,"不支持的代码生成类型");
         }
 
-        return aiCodeGeneratorFacade.generateAndSaveCodeStream(message,codeGenTypeEnum,appId);
+        // 1. 保存用户消息
+        saveChatHistory(appId, message, MessageTypeEnum.USER, loginUser);
+
+        // 2. 调用AI生成，并捕获响应流
+        Flux<String> fluxResponse = aiCodeGeneratorFacade.generateAndSaveCodeStream(message, codeGenTypeEnum, appId);
+        
+        // 3. 聚合AI响应并在完成后保存
+        StringBuilder aiMessageBuilder = new StringBuilder();
+        return fluxResponse
+                .doOnNext(chunk -> aiMessageBuilder.append(chunk))
+                .doOnComplete(() -> {
+                    String completeMessage = aiMessageBuilder.toString();
+                    if (StrUtil.isNotBlank(completeMessage)) {
+                        saveChatHistory(appId, completeMessage, MessageTypeEnum.AI, loginUser);
+                    }
+                })
+                .doOnError(e -> {
+                    String errorMessage = "生成失败: " + e.getMessage();
+                    saveChatHistory(appId, errorMessage, MessageTypeEnum.AI, loginUser);
+                });
+    }
+
+    /**
+     * 保存对话历史
+     *
+     * @param appId
+     * @param content
+     * @param messageTypeEnum
+     * @param loginUser
+     */
+    private void saveChatHistory(Long appId, String content, MessageTypeEnum messageTypeEnum, User loginUser) {
+        try {
+            ChatHistoryAddRequest addRequest = new ChatHistoryAddRequest();
+            addRequest.setAppId(appId);
+            addRequest.setContent(content);
+            addRequest.setMessageType(messageTypeEnum.getValue());
+            chatHistoryService.addChatHistory(addRequest, loginUser);
+        } catch (Exception e) {
+            log.error("保存对话历史失败: appId={}, type={}, error={}", appId, messageTypeEnum.getText(), e.getMessage());
+        }
     }
 
 

@@ -3,6 +3,7 @@ import { ref, onMounted, nextTick, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { getMyAppInfo, deployApp, type AppVO } from '@/api/app'
+import { listChatHistoryByPage, type ChatHistoryVO } from '@/api/chat'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
@@ -13,6 +14,8 @@ const appId = route.params.appId as string
 const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
+const codeGenType = ref('html') // 下拉选择：支持 'chat' | 'html' | 'multi_file'
+const previewLoading = ref(false)
 
 // Chat
 interface Message {
@@ -24,11 +27,16 @@ const messages = ref<Message[]>([])
 const inputPrompt = ref('')
 const chatContainer = ref<HTMLElement>()
 
+// History Pagination
+const hasMore = ref(false)
+const lastCreateTime = ref<string | undefined>(undefined)
+const historyLoading = ref(false)
+
 // Preview
 const previewUrl = computed(() => {
   if (!app.value) return ''
-  // Use timestamp to force refresh
-  return `http://localhost:8123/api/static/${app.value.codeGenType || 'website'}_${app.value.id}/index.html?t=${new Date().getTime()}`
+  if (codeGenType.value === 'chat') return ''
+  return `http://localhost:8123/api/static/${codeGenType.value || 'website'}_${app.value.id}/index.html?t=${new Date().getTime()}`
 })
 const iframeRef = ref<HTMLIFrameElement>()
 
@@ -40,13 +48,66 @@ const loadAppInfo = async () => {
     const res = await getMyAppInfo(appId)
     if (res) {
       app.value = res
+      if (res.codeGenType) {
+        codeGenType.value = res.codeGenType
+      }
     } else {
       message.error('应用不存在')
     }
-  } catch (e: any) {
+  } catch {
     message.error('加载应用失败')
   } finally {
     loading.value = false
+  }
+}
+
+// Load Chat History
+const loadHistory = async (isLoadMore = false) => {
+  if (!appId) return
+  historyLoading.value = true
+  try {
+    const res = await listChatHistoryByPage({
+      appId,
+      pageSize: 10,
+      lastCreateTime: isLoadMore ? lastCreateTime.value : undefined
+    })
+    
+    if (res && res.records && res.records.length > 0) {
+      // Backend returns newest first (DESC by createTime)
+      // We want to prepend them to our messages list
+      
+      const newMessages: Message[] = res.records.map((item: ChatHistoryVO) => ({
+        role: item.messageType === 1 ? 'ai' : 'user',
+        content: item.content
+      }))
+      
+      // Reverse to get chronological order (oldest to newest)
+      newMessages.reverse()
+      
+      if (isLoadMore) {
+        messages.value.unshift(...newMessages)
+      } else {
+        messages.value = newMessages
+      }
+      
+      // Update cursor (the oldest message in the newly fetched batch)
+      // Since backend returned [Newest ... Oldest], the last item in res.records is the oldest
+      const oldestRecord = res.records[res.records.length - 1]!
+      lastCreateTime.value = oldestRecord.createTime
+      
+      // If we got a full page, assume there might be more
+      hasMore.value = res.records.length >= 10
+      
+      if (!isLoadMore) {
+        scrollToBottom()
+      }
+    } else {
+        hasMore.value = false
+    }
+  } catch {
+    message.error('加载历史记录失败')
+  } finally {
+    historyLoading.value = false
   }
 }
 
@@ -65,55 +126,76 @@ const onGenerate = async (prompt: string) => {
 
   // Start SSE
   // Note: EventSource does not support custom headers, but supports cookies via withCredentials
+  const type = codeGenType.value
+  // Fix garbled characters: use encodeURIComponent for userMessage
+  // And ensure backend handles encoding correctly (it usually does with URL parameters)
+  // Double check if backend requires specific charset in content-type, but GET query params are standard.
   const eventSource = new EventSource(
-    `http://localhost:8123/api/app/chat/gen/code?appId=${appId}&userMessage=${encodeURIComponent(prompt)}`,
+    `/api/app/chat/gen/code?appId=${appId}&userMessage=${encodeURIComponent(prompt)}&codeGenType=${type}`,
     { withCredentials: true }
   )
 
   eventSource.onmessage = (event) => {
     try {
-      const data = JSON.parse(event.data)
-      if (data.content) {
-        messages.value[aiMsgIndex].content += data.content
-      } else {
-        // If parsed data is not the expected object structure, treat raw data as content
-        // This handles cases where data might be a JSON string or other format
-        messages.value[aiMsgIndex].content += event.data
+      // 1. Check if the event data is a valid JSON string
+      let data;
+      try {
+          data = JSON.parse(event.data);
+      } catch {
+          // Not a JSON object, treat as raw string
+          data = event.data;
       }
+
+      // 2. Handle structured data vs raw string
+      // The backend usually sends JSON with 'content' field for chunks
+      // But sometimes (e.g. from some models) it might send raw text or different structure
+      if (typeof data === 'object' && data !== null) {
+          if (data.content) {
+             messages.value[aiMsgIndex]!.content += data.content
+          } else {
+             // Fallback: append stringified object or specific field if known
+             // For now, if no content field, maybe ignore or append raw
+             // console.warn("Received object without content field:", data);
+             // Optionally append entire JSON if debugging:
+             // messages.value[aiMsgIndex].content += JSON.stringify(data);
+          }
+      } else {
+         // Raw string data
+         messages.value[aiMsgIndex]!.content += data
+      }
+
     } catch (e) {
-      // If parsing fails (e.g., plain text), treat raw data as content
-      // Note: SSE handles newlines in data automatically
-      messages.value[aiMsgIndex].content += event.data
+      console.error("Error processing SSE message:", e);
+      messages.value[aiMsgIndex]!.content += event.data
     }
     scrollToBottom()
   }
 
   eventSource.addEventListener('done', () => {
-    messages.value[aiMsgIndex].loading = false
+    messages.value[aiMsgIndex]!.loading = false
     eventSource.close()
     refreshPreview()
+    // 生成完成后刷新历史记录
+    loadHistory(false)
   })
   
-  eventSource.addEventListener('error', (event) => {
-    const data = JSON.parse(event.data)
-    message.error(data.message)
-    messages.value[aiMsgIndex].loading = false
-    messages.value[aiMsgIndex].content += '\n[生成出错]'
-    eventSource.close()
-  })
+  // EventSource 'error' events do not provide data payload; rely on onerror handler below
 
   eventSource.onerror = (event) => {
     console.error('SSE Error', event)
     eventSource.close()
-    if (messages.value[aiMsgIndex].loading) {
-        messages.value[aiMsgIndex].loading = false
-        messages.value[aiMsgIndex].content += '\n[生成出错]'
+    if (messages.value[aiMsgIndex]!.loading) {
+        messages.value[aiMsgIndex]!.loading = false
+        messages.value[aiMsgIndex]!.content += '\n[生成出错]'
     }
+    // 出错也尝试刷新历史记录，捕获后端已保存的错误信息
+    loadHistory(false)
   }
 }
 
 const refreshPreview = () => {
   if (iframeRef.value) {
+    previewLoading.value = true
     // Reload iframe
     iframeRef.value.src = iframeRef.value.src
   }
@@ -136,7 +218,7 @@ const handleDeploy = async () => {
       message.success('部署成功')
       window.open(deployUrl, '_blank')
     }
-  } catch (e: any) {
+  } catch {
     message.error('部署失败')
   } finally {
     deploying.value = false
@@ -151,10 +233,27 @@ const onSendMessage = () => {
 
 onMounted(async () => {
   await loadAppInfo()
-  const initPrompt = route.query.initPrompt as string
-  if (initPrompt) {
+  await loadHistory(false)
+  
+  const initPrompt = route.query.initPrompt
+    ? decodeURIComponent(route.query.initPrompt as string)
+    : ''
+  const initChatOnly = route.query.chatOnly as string
+  if (initChatOnly === 'true') {
+      codeGenType.value = 'chat'
+  }
+  
+  // Only auto-send initPrompt if:
+  // 1. It exists
+  // 2. It's the owner of the app
+  // 3. There is no chat history yet
+  if (initPrompt && app.value && userStore.currentUser?.id === app.value.userId && messages.value.length === 0) {
     // Clear query param to avoid re-trigger on reload
-    router.replace({ query: { ...route.query, initPrompt: undefined } })
+    const newQuery = { ...route.query }
+    delete newQuery.initPrompt
+    delete newQuery.chatOnly
+    
+    router.replace({ query: newQuery })
     onGenerate(initPrompt)
   }
 })
@@ -171,7 +270,11 @@ onMounted(async () => {
             </template>
         </a-button>
         <span class="app-name">{{ app?.appName || '加载中...' }}</span>
-        <a-tag v-if="app?.codeGenType">{{ app.codeGenType }}</a-tag>
+        <a-select v-model:value="codeGenType" style="width: 180px">
+            <a-select-option value="chat">仅聊天</a-select-option>
+            <a-select-option value="html">原生 HTML</a-select-option>
+            <a-select-option value="multi_file">原生多文件</a-select-option>
+        </a-select>
       </div>
       <div class="right">
         <a-button type="primary" :loading="deploying" @click="handleDeploy">部署</a-button>
@@ -183,6 +286,9 @@ onMounted(async () => {
       <!-- Chat Area -->
       <div class="chat-area">
         <div class="message-list" ref="chatContainer">
+          <div v-if="hasMore" class="load-more">
+             <a-button type="link" size="small" :loading="historyLoading" @click="loadHistory(true)">加载更多历史消息</a-button>
+          </div>
           <div 
             v-for="(msg, index) in messages" 
             :key="index" 
@@ -217,15 +323,26 @@ onMounted(async () => {
             生成后的网页展示
         </div>
         <div class="iframe-container">
+            <div v-if="messages.some(m => m.loading)" class="preview-loading">
+                <a-spin tip="正在生成代码中，请稍候..." />
+            </div>
+            <!-- 
+                Show iframe if:
+                1. App info is loaded
+                2. Not currently generating (loading handled by overlay above)
+                3. We have a preview URL
+                4. AND: We have at least some history OR the app is deployed/featured (priority > 0)
+                   OR simply always show it and let it 404 if not found (better for existing apps with lost history)
+            -->
             <iframe 
-                v-if="app"
+                v-if="app && !messages.some(m => m.loading) && codeGenType !== 'chat'"
                 ref="iframeRef"
                 :src="previewUrl" 
                 title="App Preview"
                 style="width: 100%; height: 100%; border: none;"
             ></iframe>
-            <div v-else class="empty-preview">
-                请先生成应用
+            <div v-else-if="!messages.some(m => m.loading)" class="empty-preview">
+                {{ app ? '暂无预览' : '请先生成应用' }}
             </div>
         </div>
       </div>
@@ -276,6 +393,10 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+.load-more {
+    text-align: center;
+    margin-bottom: 10px;
 }
 .message {
     display: flex;
@@ -333,6 +454,18 @@ onMounted(async () => {
 .iframe-container {
     flex: 1;
     position: relative;
+}
+.preview-loading {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.8);
+    z-index: 10;
 }
 .empty-preview {
     display: flex;

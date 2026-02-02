@@ -27,6 +27,13 @@ export const GLOBAL_MENU_ITEMS: GlobalMenuItem[] = [
     requiresAdmin: true,
   },
   {
+    key: 'adminChat',
+    label: '对话管理',
+    path: '/admin/chat',
+    requiresLogin: true,
+    requiresAdmin: true,
+  },
+  {
     key: 'about',
     label: '关于',
     path: '/about',

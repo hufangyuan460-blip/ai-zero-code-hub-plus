@@ -6,6 +6,20 @@ spring:
     password: ${DATABASE_PASSWORD}
   application:
    name: ai-zero-code-hub
+  data:
+    redis:
+      host: localhost
+      port: 6379
+#      password: 123456
+      ttl: 3600
+
+  session:
+    store-type: redis
+    redis:
+      namespace: ai-zero-code-hub:session
+  servlet:
+    session:
+      timeout: 30m
 
 server:
   port: 8123
@@ -46,3 +60,6 @@ langchain4j:
         log-requests: true
         #      合理设置token参数，防止JSON字符串被中途截断
         max-tokens: 8192
+
+
+

@@ -14,11 +14,15 @@ import {
 } from '@/api/app'
 import { useUserStore } from '@/stores/user'
 
+
+
 const router = useRouter()
 const userStore = useUserStore()
 
 const prompt = ref('')
 const selectedType = ref('website')
+const customType = ref('')
+const codeGenType = ref('html')
 
 const myApps = ref<AppVO[]>([])
 const myTotal = ref(0)
@@ -70,16 +74,43 @@ const onSearch = async () => {
   loading.value = true
   try {
     const selectedLabel = appTypes.find(t => t.key === selectedType.value)?.label || '网站'
-    const fullPrompt = `${prompt.value}，应用类型：${selectedLabel}`
+    const fullPrompt = codeGenType.value === 'chat'
+      ? prompt.value
+      : `${prompt.value}，应用类型：${selectedLabel}`
+
+    // 默认使用提示词的前10个字符作为应用名称
+    const appName = prompt.value.length > 10 ? prompt.value.substring(0, 10) + '...' : prompt.value
+
+    // If chat mode is selected, we still create an app but pass 'chat' intent to next page
+    // The backend createApp expects 'html' or 'multi_file' in codeGenType for now to init structure,
+    // or we can pass 'chat' if backend supports it.
+    // However, backend Enum for App.codeGenType usually stores the *target* code type.
+    // Let's assume for 'chat' mode we default to 'html' structure for the App entity, 
+    // but the generator page will start in chat mode.
+    // Or if codeGenType is 'chat', we pass that. 
+    // Let's use 'html' as default storage type if 'chat' is selected, 
+    // but pass a flag to the generator page.
+    
+    // Actually, user might want to decide code type later.
+    // Let's check backend AppCreateRequest.
+    // Backend: createApp -> app.setCodeGenType(codeGenType)
+    // If we pass 'chat' to backend, verify if backend CodeGenTypeEnum has 'chat'.
+    // Yes, we added 'CHAT' to backend enum in previous turn.
     
     const appId = await createApp({
+      appName: appName,
       initPrompt: fullPrompt,
-      codeGenType: 'html', // Backend only supports 'html' or 'multi_file'
+      codeGenType: codeGenType.value,
     })
+    
     message.success('创建成功，正在跳转...')
-    router.push(`/app/generator/${appId}?initPrompt=${encodeURIComponent(fullPrompt)}`)
-  } catch (e: any) {
-    message.error(e.message || '创建失败')
+    const query: Record<string, string> = { initPrompt: fullPrompt }
+    if (codeGenType.value === 'chat') {
+      query.chatOnly = 'true'
+    }
+    router.push({ path: `/app/generator/${appId}`, query })
+  } catch (e: unknown) {
+    message.error((e as Error)?.message || '创建失败')
   } finally {
     loading.value = false
   }
@@ -122,7 +153,8 @@ const appTypes = [
   { key: 'website', label: '企业网站', color: 'blue' },
   { key: 'blog', label: '个人博客', color: 'green' },
   { key: 'admin', label: '电商运营后台', color: 'orange' },
-  { key: 'community', label: '暗黑话题社区', color: 'purple' },
+  { key: 'community', label: '游戏', color: 'purple' },
+  { key: 'custom', label: '自定义', color: 'cyan' },
 ]
 </script>
 
@@ -132,7 +164,7 @@ const appTypes = [
     <div class="hero-section">
       <h1 class="title">一句话 <span class="icon">🐱</span> 呈所想</h1>
       <p class="subtitle">与 AI 对话轻松创建应用和网站</p>
-      
+
       <div class="search-box">
         <a-input-search
           v-model:value="prompt"
@@ -142,16 +174,31 @@ const appTypes = [
           @search="onSearch"
           :loading="loading"
         />
+        <div style="margin-top: 16px; display: flex; justify-content: center; gap: 16px; align-items: center;">
+            <span>生成模式：</span>
+            <a-radio-group v-model:value="codeGenType">
+                <a-radio-button value="html">原生 HTML</a-radio-button>
+                <a-radio-button value="multi_file">原生多文件</a-radio-button>
+                <a-radio-button value="chat">仅聊天</a-radio-button>
+            </a-radio-group>
+        </div>
         <div class="tags">
-           <a-tag 
-             v-for="type in appTypes" 
-             :key="type.key" 
-             :color="selectedType === type.key ? type.color : 'default'" 
+           <a-tag
+             v-for="type in appTypes"
+             :key="type.key"
+             :color="selectedType === type.key ? type.color : 'default'"
              class="type-tag"
              @click="selectedType = type.key"
            >
              {{ type.label }}
            </a-tag>
+           <a-input
+                v-if="selectedType === 'custom'"
+                v-model:value="customType"
+                placeholder="请输入类型"
+                size="small"
+                style="width: 120px; margin-left: 8px;"
+           />
         </div>
       </div>
     </div>

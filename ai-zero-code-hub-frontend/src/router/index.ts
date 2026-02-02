@@ -39,6 +39,15 @@ const router = createRouter({
       component: () => import('@/pages/admin/AppManagePage.vue'),
     },
     {
+      path: '/admin/chat',
+      name: 'adminChat',
+      meta: {
+        requiresLogin: true,
+        requiresAdmin: true,
+      },
+      component: () => import('@/pages/admin/ChatManagePage.vue'),
+    },
+    {
       path: '/app/generator/:appId',
       name: 'appGenerator',
       meta: {

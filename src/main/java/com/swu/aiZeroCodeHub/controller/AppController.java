@@ -13,15 +13,25 @@ import com.swu.aiZeroCodeHub.model.dto.app.AppCreateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppFeaturedQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppMyQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
-import com.swu.aiZeroCodeHub.model.entity.User;
-import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
-import com.swu.aiZeroCodeHub.service.AppService;
-import com.swu.aiZeroCodeHub.service.UserService;
-import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
+import com.swu.aiZeroCodeHub.service.AppService;
+import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.http.codec.ServerSentEvent;
 import reactor.core.publisher.Flux;
+import com.swu.aiZeroCodeHub.service.UserService;
+import com.swu.aiZeroCodeHub.model.entity.User;
+import reactor.core.publisher.Mono;
 
 /**
  * 应用 控制层。
@@ -34,21 +44,8 @@ public class AppController {
 
     @Autowired
     private AppService appService;
-
     @Autowired
     private UserService userService;
-
-    /**
-     * 对话生成代码（SSE 流式返回）
-     */
-    @GetMapping(value = "/chat/gen/code", produces = MediaType.TEXT_EVENT_STREAM_VALUE + ";charset=UTF-8")
-    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
-    public Flux<String> chatToGenCode(Long appId, String userMessage, HttpServletRequest request) {
-        ThrowUtils.throwExceptionByConditionAndErrorCode(appId == null || appId <= 0, ErrorCode.PARAM_ERROR);
-        ThrowUtils.throwExceptionByConditionAndErrorCode(userMessage == null, ErrorCode.PARAM_ERROR);
-        User loginUser = userService.getLoginUser(request);
-        return appService.chatToGenCode(appId, userMessage, loginUser);
-    }
 
     /**
      * 用户创建应用（必须填写 initPrompt）。
@@ -155,4 +152,41 @@ public class AppController {
         Page<AppVO> page = appService.adminPageAppVo(appAdminQueryRequest);
         return ResultUtils.success(page);
     }
+
+    /**
+     * 流式生成代码 / 普通对话（SSE）
+     * 前端使用 EventSource 订阅该接口
+     */
+    @GetMapping(value = "/chat/gen/code", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public Flux<ServerSentEvent<String>> chatGenerateCode(@RequestParam("appId") Long appId,
+                                                          @RequestParam("userMessage") String userMessage,
+                                                          @RequestParam(value = "codeGenType", required = false) String codeGenType,
+                                                          HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        Flux<String> flux = appService.chatToGenCode(appId, userMessage, codeGenType, loginUser);
+        Flux<ServerSentEvent<String>> stream = flux.map(chunk ->
+                ServerSentEvent.builder(chunk).build()
+        );
+        return stream.concatWith(Flux.just(ServerSentEvent.builder("")
+                .event("done")
+                .build()));
+    }
+
+    /**
+     * 部署生成的应用，返回部署地址
+     */
+    @PostMapping("/deploy")
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public BaseResponse<String> deploy(@RequestBody java.util.Map<String, String> body, HttpServletRequest request) {
+        String appIdStr = body.get("appId");
+        ThrowUtils.throwExceptionByConditionAndErrorCode(appIdStr == null, ErrorCode.PARAM_ERROR);
+        Long appId = Long.valueOf(appIdStr);
+        User loginUser = userService.getLoginUser(request);
+        String url = appService.deployApp(appId, loginUser);
+        return ResultUtils.success(url);
+    }
 }
+
+
+   

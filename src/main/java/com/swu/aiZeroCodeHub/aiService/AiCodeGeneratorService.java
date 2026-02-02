@@ -38,5 +38,11 @@ public interface AiCodeGeneratorService {
     @SystemMessage(fromResource = "prompt/codegen-multi-file-system-prompt.txt")
     Flux<String> generateMultiFileCodeStream(String userMessage);
 
-
+    /**
+     * 普通对话（流式）
+     * @param userMessage
+     * @return
+     */
+    @SystemMessage(fromResource = "prompt/chat-system-prompt.txt")
+    Flux<String> chatStream(String userMessage);
 }

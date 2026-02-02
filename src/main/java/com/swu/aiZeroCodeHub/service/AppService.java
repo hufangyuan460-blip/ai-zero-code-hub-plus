@@ -45,10 +45,11 @@ public interface AppService extends IService<App> {
      * 调用AI核心业务生成代码
      * @param appId
      * @param message
+     * @param codeGenType
      * @param loginUser
      * @return
      */
-    Flux<String> chatToGenCode(Long appId, String message, User loginUser);
+    Flux<String> chatToGenCode(Long appId, String message, String codeGenType, User loginUser);
 
     /**
      * 部署AI生成的网页代码

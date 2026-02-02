@@ -53,3 +53,19 @@ CREATE TABLE app (
                      INDEX idx_userId (userId)             -- 提升基于用户 ID 的查询性能
 
 ) comment '应用' collate = utf8mb4_unicode_ci;
+
+
+# 对话历史表
+CREATE TABLE chat_history (
+                              id bigint AUTO_INCREMENT COMMENT 'id' PRIMARY KEY,
+                              message text NOT NULL COMMENT '消息',
+                              messageType varchar(32) NOT NULL COMMENT 'user/ai',
+                              appId bigint NOT NULL COMMENT '应用id',
+                              userId bigint NOT NULL COMMENT '创建用户id',
+                              createTime datetime DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT '创建时间',
+                              updateTime datetime DEFAULT CURRENT_TIMESTAMP NOT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                              isDelete tinyint DEFAULT 0 NOT NULL COMMENT '是否删除',
+                              INDEX idx_appId (appId),
+                              INDEX idx_createTime (createTime),
+                              INDEX idx_appId_createTime (appId, createTime)
+) COMMENT '对话历史' COLLATE = utf8mb4_unicode_ci;

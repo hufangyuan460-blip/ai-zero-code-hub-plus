@@ -25,7 +25,7 @@ import java.io.File;
 @Slf4j
 public class AiCodeGeneratorFacade {
     @Resource
-    private AiCodeGeneratorService aiCodeGeneratorService;
+    private com.swu.aiZeroCodeHub.config.AiCodeGeneratorServiceFactory aiCodeGeneratorServiceFactory;
     @Resource
     private CodeParserExecutor codeParserExecutor;
     @Resource
@@ -34,19 +34,20 @@ public class AiCodeGeneratorFacade {
     /**
      * 非流式：生成并落盘，返回保存目录。
      */
-    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenTypeEnum,Long appId){
-        if (codeGenTypeEnum==null){
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"生成类型为空");
-        }
-        if (codeGenTypeEnum == CodeGenTypeEnum.HTML) {
-            return generateAndSaveHtmlCode(userMessage, appId);
-        } else if (codeGenTypeEnum == CodeGenTypeEnum.MULTI_FILE) {
-            return generateAndSaveMultiFileCode(userMessage, appId);
-        } else {
-            String errorMessage="不支持的生成类型" + codeGenTypeEnum.getValue();
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR,errorMessage);
-        }
-    }
+//    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenTypeEnum,Long appId){
+//        if (codeGenTypeEnum==null){
+//            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"生成类型为空");
+//        }
+//        return switch (codeGenTypeEnum){
+//            case HTML -> generateAndSaveHtmlCode(userMessage,appId);
+//            case MULTI_FILE -> generateAndSaveMultiFileCode(userMessage,appId);
+//            default -> {
+//                String errorMessage="不支持的生成类型" + codeGenTypeEnum.getValue();
+//                throw new BusinessException(ErrorCode.SYSTEM_ERROR,errorMessage);
+//            }
+//
+//        };
+//    }
 
     /**
      * 流式：生成时返回 chunk，流结束时解析并落盘。
@@ -55,15 +56,36 @@ public class AiCodeGeneratorFacade {
         if (codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "生成类型为空");
         }
+        AiCodeGeneratorService aiCodeGeneratorService = aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(appId == null ? 0L : appId);
+
         // Use if-else instead of switch expression to avoid anonymous inner class issues in some environments
         if (codeGenTypeEnum == CodeGenTypeEnum.HTML) {
-            return generateAndSaveHtmlCodeStream(userMessage, appId);
+            return generateAndSaveHtmlCodeStream(aiCodeGeneratorService, userMessage, appId);
         } else if (codeGenTypeEnum == CodeGenTypeEnum.MULTI_FILE) {
-            return generateAndSaveMultiFileCodeStream(userMessage, appId);
+            return generateAndSaveMultiFileCodeStream(aiCodeGeneratorService, userMessage, appId);
+        } else if (codeGenTypeEnum == CodeGenTypeEnum.CHAT) {
+            return chatStream(aiCodeGeneratorService, userMessage, appId);
         } else {
             String errorMessage = "不支持的生成类型" + codeGenTypeEnum.getValue();
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, errorMessage);
         }
+    }
+
+    /**
+     * 兼容测试：保留带 User 参数的重载签名，但不使用该参数
+     */
+    public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenTypeEnum, Long appId, com.swu.aiZeroCodeHub.model.entity.User user) {
+        return generateAndSaveCodeStream(userMessage, codeGenTypeEnum, appId);
+    }
+
+    /**
+     * 普通对话模式（流式）
+     * @param userMessage
+     * @param appId
+     * @return
+     */
+    private Flux<String> chatStream(AiCodeGeneratorService aiCodeGeneratorService, String userMessage, Long appId) {
+        return aiCodeGeneratorService.chatStream(userMessage);
     }
 
     /**
@@ -72,7 +94,7 @@ public class AiCodeGeneratorFacade {
      * @param appId
      * @return
      */
-    private Flux<String> generateAndSaveHtmlCodeStream(String userMessage,Long appId){
+    private Flux<String> generateAndSaveHtmlCodeStream(AiCodeGeneratorService aiCodeGeneratorService, String userMessage,Long appId){
         Flux<String> fluxResult = aiCodeGeneratorService.generateHtmlCodeStream(userMessage);
         StringBuilder codeBuilder = new StringBuilder();
         return fluxResult
@@ -97,7 +119,7 @@ public class AiCodeGeneratorFacade {
      * @param appId
      * @return
      */
-    private Flux<String> generateAndSaveMultiFileCodeStream(String userMessage,Long appId){
+    private Flux<String> generateAndSaveMultiFileCodeStream(AiCodeGeneratorService aiCodeGeneratorService, String userMessage,Long appId){
         Flux<String> fluxResult = aiCodeGeneratorService.generateMultiFileCodeStream(userMessage);
         StringBuilder codeBuilder = new StringBuilder();
         return fluxResult
@@ -123,6 +145,7 @@ public class AiCodeGeneratorFacade {
      * @return
      */
     private File generateAndSaveHtmlCode(String userMessage,Long appId){
+        AiCodeGeneratorService aiCodeGeneratorService = aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(appId == null ? 0L : appId);
         HtmlCodeResult htmlCodeResult = aiCodeGeneratorService.generateHtmlCode(userMessage);
         return codeFileSaverExecutor.save(htmlCodeResult, CodeGenTypeEnum.HTML,appId);
     }
@@ -133,6 +156,7 @@ public class AiCodeGeneratorFacade {
      * @return
      */
     private File generateAndSaveMultiFileCode(String userMessage,Long appId){
+        AiCodeGeneratorService aiCodeGeneratorService = aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(appId == null ? 0L : appId);
         MultiFileCodeResult multiFileCodeResult = aiCodeGeneratorService.generateMultiFileCode(userMessage);
         return codeFileSaverExecutor.save(multiFileCodeResult, CodeGenTypeEnum.MULTI_FILE,appId);
     }
