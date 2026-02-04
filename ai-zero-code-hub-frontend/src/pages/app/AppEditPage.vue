@@ -146,7 +146,7 @@ onMounted(() => {
         <a-list :data-source="historyList" :renderItem="(item: ChatHistoryVO) => null">
           <template #renderItem="{ item }: { item: ChatHistoryVO }">
             <a-list-item>
-              <a-list-item-meta :title="item.messageType === 1 ? 'AI' : '用户'">
+              <a-list-item-meta :title="item.messageType === 'aiMessage' ? 'AI' : '用户'">
                 <template #description>
                   <div style="white-space: pre-wrap;">{{ decodeMaybe(item.content) }}</div>
                   <div style="color: #999; margin-top: 4px;">{{ item.createTime }}</div>
