@@ -46,10 +46,10 @@ public class ChatHistory implements Serializable {
     private Long userId;
 
     /**
-     * 消息类型（0-User, 1-AI）
+     * 消息类型（userMessage / aiMessage）
      */
     @Column("messageType")
-    private Integer messageType;
+    private String messageType;
 
     /**
      * 消息内容

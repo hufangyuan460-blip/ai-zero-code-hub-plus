@@ -14,7 +14,7 @@ const appId = route.params.appId as string
 const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
-const codeGenType = ref('html') // 下拉选择：支持 'chat' | 'html' | 'multi_file'
+const codeGenType = ref('html') // 下拉选择：支持 'html' | 'multi_file' | 'vue_project'
 const previewLoading = ref(false)
 
 // Chat
@@ -35,8 +35,9 @@ const historyLoading = ref(false)
 // Preview
 const previewUrl = computed(() => {
   if (!app.value) return ''
-  if (codeGenType.value === 'chat') return ''
-  return `http://localhost:8123/api/static/${codeGenType.value || 'website'}_${app.value.id}/index.html?t=${new Date().getTime()}`
+  const base = `http://localhost:8123/api/static/${codeGenType.value || 'website'}_${app.value.id}`
+  const path = codeGenType.value === 'vue_project' ? '/dist/index.html' : '/index.html'
+  return `${base}${path}?t=${new Date().getTime()}`
 })
 const iframeRef = ref<HTMLIFrameElement>()
 
@@ -77,7 +78,7 @@ const loadHistory = async (isLoadMore = false) => {
       // We want to prepend them to our messages list
       
       const newMessages: Message[] = res.records.map((item: ChatHistoryVO) => ({
-        role: item.messageType === 1 ? 'ai' : 'user',
+        role: item.messageType === 'aiMessage' ? 'ai' : 'user',
         content: item.content
       }))
       
@@ -238,11 +239,6 @@ onMounted(async () => {
   const initPrompt = route.query.initPrompt
     ? decodeURIComponent(route.query.initPrompt as string)
     : ''
-  const initChatOnly = route.query.chatOnly as string
-  if (initChatOnly === 'true') {
-      codeGenType.value = 'chat'
-  }
-  
   // Only auto-send initPrompt if:
   // 1. It exists
   // 2. It's the owner of the app
@@ -270,11 +266,7 @@ onMounted(async () => {
             </template>
         </a-button>
         <span class="app-name">{{ app?.appName || '加载中...' }}</span>
-        <a-select v-model:value="codeGenType" style="width: 180px">
-            <a-select-option value="chat">仅聊天</a-select-option>
-            <a-select-option value="html">原生 HTML</a-select-option>
-            <a-select-option value="multi_file">原生多文件</a-select-option>
-        </a-select>
+        <a-tag color="blue">{{ codeGenType === 'vue_project' ? 'Vue 工程项目' : (codeGenType === 'multi_file' ? '原生多文件' : '原生 HTML') }}</a-tag>
       </div>
       <div class="right">
         <a-button type="primary" :loading="deploying" @click="handleDeploy">部署</a-button>
@@ -335,7 +327,7 @@ onMounted(async () => {
                    OR simply always show it and let it 404 if not found (better for existing apps with lost history)
             -->
             <iframe 
-                v-if="app && !messages.some(m => m.loading) && codeGenType !== 'chat'"
+                v-if="app && !messages.some(m => m.loading)"
                 ref="iframeRef"
                 :src="previewUrl" 
                 title="App Preview"

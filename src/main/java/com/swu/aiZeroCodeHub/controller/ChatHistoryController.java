@@ -10,7 +10,7 @@ import com.swu.aiZeroCodeHub.exception.ThrowUtils;
 import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryAddRequest;
 import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryQueryRequest;
 import com.swu.aiZeroCodeHub.model.entity.User;
-import com.swu.aiZeroCodeHub.model.vo.ChatHistoryVO;
+import com.swu.aiZeroCodeHub.model.vo.chatHistory.ChatHistoryVO;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import com.swu.aiZeroCodeHub.service.UserService;
 import jakarta.annotation.Resource;

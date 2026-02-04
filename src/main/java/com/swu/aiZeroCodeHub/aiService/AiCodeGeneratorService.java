@@ -2,25 +2,13 @@ package com.swu.aiZeroCodeHub.aiService;
 
 import com.swu.aiZeroCodeHub.model.vo.ai.HtmlCodeResult;
 import com.swu.aiZeroCodeHub.model.vo.ai.MultiFileCodeResult;
+import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.SystemMessage;
+import dev.langchain4j.service.UserMessage;
 import reactor.core.publisher.Flux;
 
 public interface AiCodeGeneratorService {
-    /**
-     * 生成单文件网页代码
-     * @param userMessage
-     * @return
-     */
-    @SystemMessage(fromResource = "prompt/codegen-html-system-prompt.txt")
-    HtmlCodeResult generateHtmlCode(String userMessage);
 
-    /**
-     * 生成多文件网页代码
-     * @param userMessage
-     * @return
-     */
-    @SystemMessage(fromResource = "prompt/codegen-multi-file-system-prompt.txt")
-    MultiFileCodeResult generateMultiFileCode(String userMessage);
 
     /**
      * 生成单文件网页代码（流式）
@@ -39,10 +27,13 @@ public interface AiCodeGeneratorService {
     Flux<String> generateMultiFileCodeStream(String userMessage);
 
     /**
-     * 普通对话（流式）
-     * @param userMessage
-     * @return
+     * 生成vue项目代码(流式)
+     * 必须加上 @MemoryId Long appId，类型要和 Tool 中的 @ToolMemoryId 一致
      */
-    @SystemMessage(fromResource = "prompt/chat-system-prompt.txt")
-    Flux<String> chatStream(String userMessage);
+    @SystemMessage(fromResource = "prompt/codegen-vueProject-system-prompt.txt")
+    Flux<String> generateProjectCodeStream(
+            @MemoryId Long appId,
+            @UserMessage String userMessage
+    );
+
 }

@@ -15,14 +15,17 @@ import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryQueryRequest;
 import com.swu.aiZeroCodeHub.model.entity.App;
 import com.swu.aiZeroCodeHub.model.entity.ChatHistory;
 import com.swu.aiZeroCodeHub.model.entity.User;
-import com.swu.aiZeroCodeHub.model.enums.MessageTypeEnum;
-import com.swu.aiZeroCodeHub.model.vo.ChatHistoryVO;
+import com.swu.aiZeroCodeHub.model.enums.ChatHistoryMessageTypeEnum;
+import com.swu.aiZeroCodeHub.model.vo.chatHistory.ChatHistoryVO;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +33,7 @@ import java.util.List;
  * 对话历史服务实现
  */
 @Service
+@Slf4j
 public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatHistory> implements ChatHistoryService {
 
     @Resource
@@ -39,12 +43,12 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
     public long addChatHistory(ChatHistoryAddRequest chatHistoryAddRequest, User loginUser) {
         ThrowUtils.throwExceptionByConditionAndErrorCode(chatHistoryAddRequest == null, ErrorCode.PARAM_ERROR);
         Long appId = chatHistoryAddRequest.getAppId();
-        Integer messageType = chatHistoryAddRequest.getMessageType();
+        String messageType = chatHistoryAddRequest.getMessageType();
         String content = chatHistoryAddRequest.getContent();
 
         // 校验参数
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用不存在");
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(MessageTypeEnum.getEnumByValue(messageType) == null, ErrorCode.PARAM_ERROR, "消息类型错误");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(ChatHistoryMessageTypeEnum.getEnumByValue(messageType) == null, ErrorCode.PARAM_ERROR, "消息类型错误");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(content), ErrorCode.PARAM_ERROR, "消息内容不能为空");
 
         // 校验应用是否存在
@@ -61,7 +65,7 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
         // 假设数据库或Entity配置了自动填充，如果没有，需手动设置。查看AppServiceImpl，save时未设置createTime，说明有自动填充或DB默认值。
         // 但这里为了保险，或者遵循项目习惯，查看App实体有createTime字段。AppServiceImpl save时没有setCreateTime。
         // 假设DB有默认值或GlobalConfig。
-        
+
         boolean result = this.save(chatHistory);
         ThrowUtils.throwExceptionByConditionAndErrorCode(!result, ErrorCode.OPERATION_ERROR);
         return chatHistory.getId();
@@ -78,7 +82,7 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
         // 校验应用是否存在及权限
         App app = appMapper.selectOneById(appId);
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
-        
+
         // Allow access if:
         // 1. User is the creator
         // 2. User is admin
@@ -96,18 +100,18 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
         if (chatHistoryQueryRequest.getMessageType() != null) {
             queryWrapper.eq("messageType", chatHistoryQueryRequest.getMessageType());
         }
-        
+
         // 游标分页逻辑：如果提供了 lastCreateTime，则查询早于该时间的记录
         if (chatHistoryQueryRequest.getLastCreateTime() != null) {
             queryWrapper.lt("createTime", chatHistoryQueryRequest.getLastCreateTime());
         }
-        
+
         // 按时间倒序，获取最新消息
         queryWrapper.orderBy("createTime", false); // false for desc
 
         long pageNumber = chatHistoryQueryRequest.getPageNumber();
         long pageSize = chatHistoryQueryRequest.getPageSize();
-        
+
         Page<ChatHistory> page = this.page(new Page<>(pageNumber, pageSize), queryWrapper);
         return getChatHistoryVOPage(page);
     }
@@ -171,6 +175,48 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
         }
         voPage.setRecords(voList);
         return voPage;
+    }
+
+    @Override
+    public int loadChatHistoryToMemory(Long appId, MessageWindowChatMemory chatMemory, int maxCount) {
+        try {
+            // 直接构造查询条件，起始点为1而不是0，用于排除最新的用户消息
+            QueryWrapper queryWrapper = QueryWrapper.create()
+                    .eq(ChatHistory::getAppId, appId)
+                    .orderBy(ChatHistory::getCreateTime, false)
+                    .limit(1, maxCount);
+            List<ChatHistory> historyList = this.list(queryWrapper);
+
+            if (CollUtil.isEmpty(historyList)) {
+                return 0;
+            }
+
+            // 反转列表，确保按时间正序（老的在前，新的在后）
+            historyList = historyList.reversed();
+
+            // 按时间顺序添加到记忆中
+            int loadedCount = 0;
+            // 先清理历史缓存，防止重复加载
+            chatMemory.clear();
+
+            for (ChatHistory history : historyList) {
+                if (ChatHistoryMessageTypeEnum.USER.getValue().equals(history.getMessageType())) {
+                    chatMemory.add(UserMessage.from(history.getContent()));
+                    loadedCount++;
+                } else if (ChatHistoryMessageTypeEnum.AI.getValue().equals(history.getMessageType())) {
+                    chatMemory.add(AiMessage.from(history.getContent()));
+                    loadedCount++;
+                }
+            }
+
+            log.info("成功为appId: {}加载了{}条历史对话", appId, loadedCount);
+            return loadedCount;
+
+        } catch (Exception e) {
+            log.error("加载历史对话失败，appId: {}, error: {}", appId, e.getMessage(), e);
+            // 加载失败不影响系统运行，只是没有历史上下文
+            return 0;
+        }
     }
 
 

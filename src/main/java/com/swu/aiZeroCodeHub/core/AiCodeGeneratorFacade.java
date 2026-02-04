@@ -1,14 +1,21 @@
 package com.swu.aiZeroCodeHub.core;
 
+import cn.hutool.json.JSONUtil;
 import com.swu.aiZeroCodeHub.aiService.AiCodeGeneratorService;
 import com.swu.aiZeroCodeHub.core.executor.CodeFileSaverExecutor;
 import com.swu.aiZeroCodeHub.core.executor.CodeParserExecutor;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
+import com.swu.aiZeroCodeHub.model.message.AiResponseMessage;
+import com.swu.aiZeroCodeHub.model.message.ToolExecutedMessage;
+import com.swu.aiZeroCodeHub.model.message.ToolRequestMessage;
 import com.swu.aiZeroCodeHub.model.vo.ai.CodeResult;
 import com.swu.aiZeroCodeHub.model.vo.ai.HtmlCodeResult;
 import com.swu.aiZeroCodeHub.model.vo.ai.MultiFileCodeResult;
+import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.service.TokenStream;
+import dev.langchain4j.service.tool.ToolExecution;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -31,23 +38,6 @@ public class AiCodeGeneratorFacade {
     @Resource
     private CodeFileSaverExecutor codeFileSaverExecutor;
 
-    /**
-     * 非流式：生成并落盘，返回保存目录。
-     */
-//    public File generateAndSaveCode(String userMessage, CodeGenTypeEnum codeGenTypeEnum,Long appId){
-//        if (codeGenTypeEnum==null){
-//            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"生成类型为空");
-//        }
-//        return switch (codeGenTypeEnum){
-//            case HTML -> generateAndSaveHtmlCode(userMessage,appId);
-//            case MULTI_FILE -> generateAndSaveMultiFileCode(userMessage,appId);
-//            default -> {
-//                String errorMessage="不支持的生成类型" + codeGenTypeEnum.getValue();
-//                throw new BusinessException(ErrorCode.SYSTEM_ERROR,errorMessage);
-//            }
-//
-//        };
-//    }
 
     /**
      * 流式：生成时返回 chunk，流结束时解析并落盘。
@@ -56,37 +46,26 @@ public class AiCodeGeneratorFacade {
         if (codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "生成类型为空");
         }
-        AiCodeGeneratorService aiCodeGeneratorService = aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(appId == null ? 0L : appId);
+        long realAppId = appId == null ? 0L : appId;
+        // 根据生成类型选择对应的 AI 服务实例（不同类型可使用不同模型 / 工具配置）
+        AiCodeGeneratorService aiCodeGeneratorService =
+                aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(realAppId, codeGenTypeEnum);
 
         // Use if-else instead of switch expression to avoid anonymous inner class issues in some environments
         if (codeGenTypeEnum == CodeGenTypeEnum.HTML) {
             return generateAndSaveHtmlCodeStream(aiCodeGeneratorService, userMessage, appId);
         } else if (codeGenTypeEnum == CodeGenTypeEnum.MULTI_FILE) {
             return generateAndSaveMultiFileCodeStream(aiCodeGeneratorService, userMessage, appId);
-        } else if (codeGenTypeEnum == CodeGenTypeEnum.CHAT) {
-            return chatStream(aiCodeGeneratorService, userMessage, appId);
+        } else if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
+            return generateAndSaveVueProjectCodeStream(aiCodeGeneratorService, userMessage, appId);
         } else {
             String errorMessage = "不支持的生成类型" + codeGenTypeEnum.getValue();
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, errorMessage);
         }
     }
 
-    /**
-     * 兼容测试：保留带 User 参数的重载签名，但不使用该参数
-     */
-    public Flux<String> generateAndSaveCodeStream(String userMessage, CodeGenTypeEnum codeGenTypeEnum, Long appId, com.swu.aiZeroCodeHub.model.entity.User user) {
-        return generateAndSaveCodeStream(userMessage, codeGenTypeEnum, appId);
-    }
 
-    /**
-     * 普通对话模式（流式）
-     * @param userMessage
-     * @param appId
-     * @return
-     */
-    private Flux<String> chatStream(AiCodeGeneratorService aiCodeGeneratorService, String userMessage, Long appId) {
-        return aiCodeGeneratorService.chatStream(userMessage);
-    }
+
 
     /**
      * 生成HTML模式的代码并且保存(流式)
@@ -140,24 +119,69 @@ public class AiCodeGeneratorFacade {
     }
 
     /**
-     * 调用业务生成单HTML代码并保存到本地
+     * 生成vue项目代码比保存
+     * @param aiCodeGeneratorService
      * @param userMessage
+     * @param appId
      * @return
      */
-    private File generateAndSaveHtmlCode(String userMessage,Long appId){
-        AiCodeGeneratorService aiCodeGeneratorService = aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(appId == null ? 0L : appId);
-        HtmlCodeResult htmlCodeResult = aiCodeGeneratorService.generateHtmlCode(userMessage);
-        return codeFileSaverExecutor.save(htmlCodeResult, CodeGenTypeEnum.HTML,appId);
+    private Flux<String> generateAndSaveVueProjectCodeStream(AiCodeGeneratorService aiCodeGeneratorService,
+                                                             String userMessage,
+                                                             Long appId) {
+        // Vue 工程模式下，代码由 FileWriteTool 直接写入到项目目录，
+        // 这里主要负责把推理模型的思考过程 / 计划 / 工具调用说明按流式返回给前端展示。
+        Flux<String> fluxResult = aiCodeGeneratorService.generateProjectCodeStream(appId, userMessage);
+        StringBuilder contentBuilder = new StringBuilder();
+        return fluxResult
+                .doOnNext(chunk -> {
+                    contentBuilder.append(chunk);
+                })
+                .doOnComplete(() -> {
+                    // 仅做日志记录，不再二次解析或落盘（文件已由工具完成写入）
+                    log.info("Vue 项目生成完成，appId: {}, 总输出长度: {}", appId, contentBuilder.length());
+                })
+                .doOnError(e -> {
+                    log.error("Vue 项目生成失败，appId: {}, error: {}", appId, e.getMessage(), e);
+                });
     }
 
+
+
     /**
-     * 调用业务生成多代码文件并保存到本地
-     * @param userMessage
-     * @return
+     * 将 TokenStream 转换为 Flux<String>，并传递工具调用信息
+     * @param tokenStream TokenStream 对象
+     * @return Flux<String> 流式响应
      */
-    private File generateAndSaveMultiFileCode(String userMessage,Long appId){
-        AiCodeGeneratorService aiCodeGeneratorService = aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(appId == null ? 0L : appId);
-        MultiFileCodeResult multiFileCodeResult = aiCodeGeneratorService.generateMultiFileCode(userMessage);
-        return codeFileSaverExecutor.save(multiFileCodeResult, CodeGenTypeEnum.MULTI_FILE,appId);
+    private Flux<String> processTokenStream(TokenStream tokenStream) {
+        return Flux.create(sink -> {
+            tokenStream.onPartialResponse((String partialResponse) -> {
+                        AiResponseMessage aiResponseMessage = new AiResponseMessage(partialResponse);
+                        sink.next(JSONUtil.toJsonStr(aiResponseMessage));
+                    })
+                    .onPartialToolExecutionRequest((index, toolExecutionRequest) -> {
+                        ToolRequestMessage toolRequestMessage = new ToolRequestMessage(toolExecutionRequest);
+                        sink.next(JSONUtil.toJsonStr(toolRequestMessage));
+                    })
+                    .onToolExecuted((ToolExecution toolExecution) -> {
+                        ToolExecutedMessage toolExecutedMessage = new ToolExecutedMessage(toolExecution);
+                        sink.next(JSONUtil.toJsonStr(toolExecutedMessage));
+                    })
+                    .onCompleteResponse((ChatResponse response) -> {
+                        sink.complete();
+                    })
+                    .onError((Throwable error) -> {
+                        error.printStackTrace();
+                        sink.error(error);
+                    })
+                    .start();
+        });
     }
+
+
+
+
+
+
+
+
 }

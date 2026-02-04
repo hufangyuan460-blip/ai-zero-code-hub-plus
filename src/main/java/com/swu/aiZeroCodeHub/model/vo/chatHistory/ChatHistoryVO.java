@@ -1,4 +1,4 @@
-package com.swu.aiZeroCodeHub.model.vo;
+package com.swu.aiZeroCodeHub.model.vo.chatHistory;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import lombok.Data;
@@ -21,7 +21,7 @@ public class ChatHistoryVO implements Serializable {
     @JsonFormat(shape = JsonFormat.Shape.STRING)
     private Long userId;
 
-    private Integer messageType;
+    private String messageType;
 
     private String content;
 

@@ -179,7 +179,7 @@ const appTypes = [
             <a-radio-group v-model:value="codeGenType">
                 <a-radio-button value="html">原生 HTML</a-radio-button>
                 <a-radio-button value="multi_file">原生多文件</a-radio-button>
-                <a-radio-button value="chat">仅聊天</a-radio-button>
+                <a-radio-button value="vue_project">Vue 工程项目</a-radio-button>
             </a-radio-group>
         </div>
         <div class="tags">

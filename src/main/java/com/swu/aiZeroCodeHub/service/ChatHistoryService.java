@@ -1,13 +1,13 @@
 package com.swu.aiZeroCodeHub.service;
 
 import com.mybatisflex.core.paginate.Page;
-import com.mybatisflex.core.query.QueryWrapper;
 import com.mybatisflex.core.service.IService;
 import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryAddRequest;
 import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryQueryRequest;
 import com.swu.aiZeroCodeHub.model.entity.ChatHistory;
 import com.swu.aiZeroCodeHub.model.entity.User;
-import com.swu.aiZeroCodeHub.model.vo.ChatHistoryVO;
+import com.swu.aiZeroCodeHub.model.vo.chatHistory.ChatHistoryVO;
+import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 
 /**
  * 对话历史服务接口
@@ -47,6 +47,8 @@ public interface ChatHistoryService extends IService<ChatHistory> {
      * @return
      */
     boolean deleteChatHistoryByAppId(Long appId);
+
+    int loadChatHistoryToMemory(Long appId, MessageWindowChatMemory chatMemory,int maxCount);
 
 
 

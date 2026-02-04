@@ -16,9 +16,9 @@ public class ChatHistoryAddRequest implements Serializable {
     private Long appId;
 
     /**
-     * 消息类型（0-User, 1-AI）
+     * 消息类型（userMessage / aiMessage）
      */
-    private Integer messageType;
+    private String messageType;
 
     /**
      * 消息内容

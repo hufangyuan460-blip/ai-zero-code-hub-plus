@@ -28,9 +28,9 @@ public class ChatHistoryQueryRequest extends PageRequest implements Serializable
     private Long userId;
 
     /**
-     * 消息类型（0-User, 1-AI）
+     * 消息类型（userMessage / aiMessage）
      */
-    private Integer messageType;
+    private String messageType;
 
     /**
      * 游标查询 - 最后一条记录的创建时间

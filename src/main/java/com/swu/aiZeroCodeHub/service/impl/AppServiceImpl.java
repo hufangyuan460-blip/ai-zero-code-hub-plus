@@ -10,6 +10,8 @@ import com.mybatisflex.spring.service.impl.ServiceImpl;
 import com.swu.aiZeroCodeHub.constant.AppConstant;
 import com.swu.aiZeroCodeHub.constant.UserConstant;
 import com.swu.aiZeroCodeHub.core.AiCodeGeneratorFacade;
+import com.swu.aiZeroCodeHub.core.builder.VueProjectBuilder;
+import com.swu.aiZeroCodeHub.core.executor.StreamHandlerExecutor;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
@@ -40,7 +42,7 @@ import java.util.List;
 import java.util.Set;
 
 import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryAddRequest;
-import com.swu.aiZeroCodeHub.model.enums.MessageTypeEnum;
+import com.swu.aiZeroCodeHub.model.enums.ChatHistoryMessageTypeEnum;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -68,6 +70,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     private ChatHistoryService chatHistoryService;
     @Autowired
     private AiCodeGeneratorFacade aiCodeGeneratorFacade;
+    @Autowired
+    private StreamHandlerExecutor streamHandlerExecutor;
+    @Autowired
+    private VueProjectBuilder vueProjectBuilder;
 
     @Override
     public long createApp(AppCreateRequest appCreateRequest, jakarta.servlet.http.HttpServletRequest request) {
@@ -404,44 +410,33 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     @Override
     public Flux<String> chatToGenCode(Long appId, String message, String codeGenType, User loginUser) {
         //参数校验
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId==null||appId<=0,ErrorCode.PARAM_ERROR,"应用ID不能为空");
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(message),ErrorCode.PARAM_ERROR,"用户提示词不能为空");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用ID不能为空");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(message), ErrorCode.PARAM_ERROR, "用户提示词不能为空");
 
         //查询应用信息
-        App app=this.getById(appId);
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app==null,ErrorCode.NOT_FOUND_ERROR,"应用不存在");
+        App app = this.getById(appId);
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
         if (!app.getUserId().equals(loginUser.getId())) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR,"无权限访问该应用");
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限访问该应用");
         }
 
         //获取应用代码生成类型：优先使用参数传入的类型，如果为空则使用应用配置的类型
         String type = StrUtil.isNotBlank(codeGenType) ? codeGenType : app.getCodeGenType();
         CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(type);
         if (codeGenTypeEnum == null) {
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"不支持的代码生成类型");
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "不支持的代码生成类型");
         }
 
         // 1. 保存用户消息
-        saveChatHistory(appId, message, MessageTypeEnum.USER, loginUser);
+        saveChatHistory(appId, message, ChatHistoryMessageTypeEnum.USER, loginUser);
 
         // 2. 调用AI生成，并捕获响应流
         Flux<String> fluxResponse = aiCodeGeneratorFacade.generateAndSaveCodeStream(message, codeGenTypeEnum, appId);
-        
-        // 3. 聚合AI响应并在完成后保存
-        StringBuilder aiMessageBuilder = new StringBuilder();
-        return fluxResponse
-                .doOnNext(chunk -> aiMessageBuilder.append(chunk))
-                .doOnComplete(() -> {
-                    String completeMessage = aiMessageBuilder.toString();
-                    if (StrUtil.isNotBlank(completeMessage)) {
-                        saveChatHistory(appId, completeMessage, MessageTypeEnum.AI, loginUser);
-                    }
-                })
-                .doOnError(e -> {
-                    String errorMessage = "生成失败: " + e.getMessage();
-                    saveChatHistory(appId, errorMessage, MessageTypeEnum.AI, loginUser);
-                });
+
+        //3. 调用流处理执行器处理流
+        return streamHandlerExecutor.doExecute(fluxResponse,chatHistoryService,appId,loginUser,codeGenTypeEnum);
     }
+
 
     /**
      * 保存对话历史
@@ -451,7 +446,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
      * @param messageTypeEnum
      * @param loginUser
      */
-    private void saveChatHistory(Long appId, String content, MessageTypeEnum messageTypeEnum, User loginUser) {
+    private void saveChatHistory(Long appId, String content, ChatHistoryMessageTypeEnum messageTypeEnum, User loginUser) {
         try {
             ChatHistoryAddRequest addRequest = new ChatHistoryAddRequest();
             addRequest.setAppId(appId);
@@ -462,6 +457,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             log.error("保存对话历史失败: appId={}, type={}, error={}", appId, messageTypeEnum.getText(), e.getMessage());
         }
     }
+
+
 
 
     /**
@@ -498,6 +495,24 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             throw new BusinessException(ErrorCode.PARAM_ERROR,"应用代码不存在，请先生成代码");
         }
 
+        //! 如果部署的是vue项目，使用单独部署器部署
+        // 7. Vue项目特殊处理：执行构建
+        CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(codeGenType);
+        if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
+            // Vue项目需要构建
+            boolean buildSuccess = vueProjectBuilder.buildProject(sourceDirPath);
+            ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!buildSuccess, ErrorCode.SYSTEM_ERROR, "Vue项目构建失败，请检查代码和依赖");
+
+            // 检查dist目录是否存在
+            File distDir = new File(sourceDirPath, "dist");
+            ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!distDir.exists(), ErrorCode.SYSTEM_ERROR, "Vue项目构建完成但未生成dist目录");
+
+            // 将dist目录作为部署源
+            sourceDir = distDir;
+            log.info("Vue项目构建成功，将部署dist目录: {}", distDir.getAbsolutePath());
+        }
+
+
         //复制文件到部署目录
         String deployDirPath=AppConstant.CODE_DEPLOY_ROOT_DIR+File.separator+deployKey;
         try{
@@ -518,6 +533,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         return String.format("%s/%s/",AppConstant.CODE_DEPLOY_HOST,deployKey);
 
     }
+
+
 
 
 }
