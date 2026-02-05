@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -31,7 +32,7 @@ import java.util.Set;
 @Component
 public class JsonMessageStreamHandler {
     @Resource
-    private ChatHistoryService chatHistoryService;
+    private SSEParser sseParser;
 
     /**
      * 处理 TokenStream （VUE_PROJECT）
@@ -49,33 +50,27 @@ public class JsonMessageStreamHandler {
                                User loginUser) {
         // 收集数据用于生成后端记忆格式
         StringBuilder chatHistoryStringBuilder = new StringBuilder();
-        // 用于跟踪已经见过的工具 ID，判断是否是第一次调用
         Set<String> seenToolIds = new HashSet<>();
 
-        return originFlux.map(chunk -> {
-                    // 解析每个 JSON 消息块
-                    return handleJsonMessageChunk(chunk, chatHistoryStringBuilder, seenToolIds);
+        return originFlux
+                .flatMap(chunk -> {
+                    // 使用SSE解析器处理
+                    List<String> jsonMessages = sseParser.parseSSE(chunk);
+                    return Flux.fromIterable(jsonMessages)
+                            .map(json -> handleJsonMessageChunk(json, chatHistoryStringBuilder, seenToolIds))
+                            .filter(StrUtil::isNotEmpty);
                 })
-                .filter(StrUtil::isNotEmpty) // 过滤空字串
                 .doOnComplete(() -> {
-                    // 流式响应完成后，添加 AI 消息到对话历史
+                    // 保存对话历史
                     String aiResponse = chatHistoryStringBuilder.toString();
-                    saveChatHistory(
-                            appId,
-                            aiResponse,
-                            ChatHistoryMessageTypeEnum.AI, // 假设你枚举名是这个
-                            loginUser
-                    );
+                    if (StrUtil.isNotBlank(aiResponse)) {
+                        saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser,chatHistoryService);
+                    }
                 })
                 .doOnError(error -> {
-                    // 如果 AI 回复失败，也要记录错误消息
-                    String errorMessage = "AI 回复失败: " + error.getMessage();
-                    saveChatHistory(
-                            appId,
-                            errorMessage,
-                            ChatHistoryMessageTypeEnum.AI,
-                            loginUser
-                    );
+                    log.error("处理SSE流失败", error);
+                    saveChatHistory(appId, "AI回复失败: " + error.getMessage(),
+                            ChatHistoryMessageTypeEnum.AI, loginUser,chatHistoryService);
                 });
     }
 
@@ -150,7 +145,7 @@ public class JsonMessageStreamHandler {
      * @param messageTypeEnum
      * @param loginUser
      */
-    private void saveChatHistory(Long appId, String content, ChatHistoryMessageTypeEnum messageTypeEnum, User loginUser) {
+    private void saveChatHistory(Long appId, String content, ChatHistoryMessageTypeEnum messageTypeEnum, User loginUser,ChatHistoryService chatHistoryService) {
         try {
             ChatHistoryAddRequest addRequest = new ChatHistoryAddRequest();
             addRequest.setAppId(appId);

@@ -130,7 +130,8 @@ public class AiCodeGeneratorFacade {
                                                              Long appId) {
         // Vue 工程模式下，代码由 FileWriteTool 直接写入到项目目录，
         // 这里主要负责把推理模型的思考过程 / 计划 / 工具调用说明按流式返回给前端展示。
-        Flux<String> fluxResult = aiCodeGeneratorService.generateProjectCodeStream(appId, userMessage);
+        TokenStream tokenStream = aiCodeGeneratorService.generateProjectCodeStream(appId, userMessage);
+        Flux<String> fluxResult = processTokenStream(tokenStream);
         StringBuilder contentBuilder = new StringBuilder();
         return fluxResult
                 .doOnNext(chunk -> {

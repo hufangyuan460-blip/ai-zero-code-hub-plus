@@ -6,6 +6,7 @@ import com.swu.aiZeroCodeHub.model.enums.ChatHistoryMessageTypeEnum;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
 /**
@@ -15,7 +16,8 @@ import reactor.core.publisher.Flux;
 @Slf4j
 public class SimpleTextStreamHandler {
     @Resource
-    private ChatHistoryService chatHistoryService;
+    private SSEParser sseParser;
+
     /**
      * 处理传统流（HTML, MULTI_FILE）
      * 直接收集完整的文本响应
@@ -36,12 +38,12 @@ public class SimpleTextStreamHandler {
                 .doOnComplete(() -> {
                     // 流式响应完成后，添加AI消息到对话历史
                     String aiResponse = aiResponseBuilder.toString();
-                    saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser);
+                    saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser, chatHistoryService);
                 })
                 .doOnError(error -> {
                     // 如果AI回复失败，也要记录错误消息
                     String errorMessage = "AI回复失败: " + error.getMessage();
-                    saveChatHistory(appId, errorMessage, ChatHistoryMessageTypeEnum.AI, loginUser);
+                    saveChatHistory(appId, errorMessage, ChatHistoryMessageTypeEnum.AI, loginUser,chatHistoryService);
                 });
     }
 
@@ -53,7 +55,7 @@ public class SimpleTextStreamHandler {
      * @param messageTypeEnum
      * @param loginUser
      */
-    private void saveChatHistory(Long appId, String content, ChatHistoryMessageTypeEnum messageTypeEnum, User loginUser) {
+    private void saveChatHistory(Long appId, String content, ChatHistoryMessageTypeEnum messageTypeEnum, User loginUser,ChatHistoryService chatHistoryService) {
         try {
             ChatHistoryAddRequest addRequest = new ChatHistoryAddRequest();
             addRequest.setAppId(appId);

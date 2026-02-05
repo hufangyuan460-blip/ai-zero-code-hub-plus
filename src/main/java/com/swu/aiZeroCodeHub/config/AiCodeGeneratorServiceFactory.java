@@ -21,7 +21,6 @@ import org.springframework.context.annotation.Configuration;
 
 import java.time.Duration;
 
-import static com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum.VUE_PROJECT;
 
 
 @Configuration
@@ -37,6 +36,8 @@ public class AiCodeGeneratorServiceFactory {
     private ChatHistoryService chatHistoryService;
     @Resource
     private StreamingChatModel reasoningStreamingChatModel;
+    @Resource
+    private FileWriteTool fileWriteTool;
 
 
     /**
@@ -64,7 +65,7 @@ public class AiCodeGeneratorServiceFactory {
                     AiServices.builder(AiCodeGeneratorService.class)
                             .streamingChatModel(reasoningStreamingChatModel)
                             .chatMemoryProvider(memoryId -> chatMemory)
-                            .tools(new FileWriteTool())
+                            .tools(fileWriteTool)
                             //幻觉工具名称策略
                             .hallucinatedToolNameStrategy(toolExecutionRequest ->
                                     ToolExecutionResultMessage.from(toolExecutionRequest,

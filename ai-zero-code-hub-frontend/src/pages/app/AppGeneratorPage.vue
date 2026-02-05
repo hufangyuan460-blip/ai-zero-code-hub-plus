@@ -15,6 +15,11 @@ const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
 const codeGenType = ref('html') // 下拉选择：支持 'html' | 'multi_file' | 'vue_project'
+const codeGenTypeMap: Record<string, string> = {
+  html: '原生 HTML',
+  multi_file: '原生多文件',
+  vue_project: 'Vue 工程项目'
+}
 const previewLoading = ref(false)
 
 // Chat
@@ -35,9 +40,7 @@ const historyLoading = ref(false)
 // Preview
 const previewUrl = computed(() => {
   if (!app.value) return ''
-  const base = `http://localhost:8123/api/static/${codeGenType.value || 'website'}_${app.value.id}`
-  const path = codeGenType.value === 'vue_project' ? '/dist/index.html' : '/index.html'
-  return `${base}${path}?t=${new Date().getTime()}`
+  return `http://localhost:8123/api/static/${codeGenType.value || 'website'}_${app.value.id}/index.html?t=${new Date().getTime()}`
 })
 const iframeRef = ref<HTMLIFrameElement>()
 
@@ -78,7 +81,7 @@ const loadHistory = async (isLoadMore = false) => {
       // We want to prepend them to our messages list
       
       const newMessages: Message[] = res.records.map((item: ChatHistoryVO) => ({
-        role: item.messageType === 'aiMessage' ? 'ai' : 'user',
+        role: item.messageType === 1 ? 'ai' : 'user',
         content: item.content
       }))
       
@@ -266,7 +269,7 @@ onMounted(async () => {
             </template>
         </a-button>
         <span class="app-name">{{ app?.appName || '加载中...' }}</span>
-        <a-tag color="blue">{{ codeGenType === 'vue_project' ? 'Vue 工程项目' : (codeGenType === 'multi_file' ? '原生多文件' : '原生 HTML') }}</a-tag>
+        <a-tag color="blue" style="font-size: 14px; padding: 4px 10px;">{{ codeGenTypeMap[codeGenType] || codeGenType }}</a-tag>
       </div>
       <div class="right">
         <a-button type="primary" :loading="deploying" @click="handleDeploy">部署</a-button>

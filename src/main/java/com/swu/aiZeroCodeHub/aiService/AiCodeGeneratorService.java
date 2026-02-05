@@ -4,6 +4,7 @@ import com.swu.aiZeroCodeHub.model.vo.ai.HtmlCodeResult;
 import com.swu.aiZeroCodeHub.model.vo.ai.MultiFileCodeResult;
 import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.SystemMessage;
+import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
 import reactor.core.publisher.Flux;
 
@@ -31,7 +32,7 @@ public interface AiCodeGeneratorService {
      * 必须加上 @MemoryId Long appId，类型要和 Tool 中的 @ToolMemoryId 一致
      */
     @SystemMessage(fromResource = "prompt/codegen-vueProject-system-prompt.txt")
-    Flux<String> generateProjectCodeStream(
+    TokenStream generateProjectCodeStream(
             @MemoryId Long appId,
             @UserMessage String userMessage
     );

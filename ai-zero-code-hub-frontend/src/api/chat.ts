@@ -6,7 +6,7 @@ export interface ChatHistoryVO {
   id: string
   appId: string
   userId: string
-  messageType: string
+  messageType: number // 0-User, 1-AI
   content: string
   createTime: string
   updateTime?: string
@@ -17,7 +17,7 @@ export interface ChatHistoryQueryRequest {
   pageSize?: number
   appId?: string
   userId?: string
-  messageType?: string
+  messageType?: number
   lastCreateTime?: string
 }
 
