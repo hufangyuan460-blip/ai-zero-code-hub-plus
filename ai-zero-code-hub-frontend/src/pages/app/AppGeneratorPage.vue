@@ -14,11 +14,12 @@ const appId = route.params.appId as string
 const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
+const deployedUrl = ref<string>('')
 const codeGenType = ref('html') // 下拉选择：支持 'html' | 'multi_file' | 'vue_project'
 const codeGenTypeMap: Record<string, string> = {
   html: '原生 HTML',
   multi_file: '原生多文件',
-  vue_project: 'Vue 工程项目'
+  vue_project: 'Vue 工程项目(复杂项目)'
 }
 const previewLoading = ref(false)
 
@@ -39,6 +40,7 @@ const historyLoading = ref(false)
 
 // Preview
 const previewUrl = computed(() => {
+  if (deployedUrl.value) return deployedUrl.value
   if (!app.value) return ''
   return `http://localhost:8123/api/static/${codeGenType.value || 'website'}_${app.value.id}/index.html?t=${new Date().getTime()}`
 })
@@ -54,6 +56,9 @@ const loadAppInfo = async () => {
       app.value = res
       if (res.codeGenType) {
         codeGenType.value = res.codeGenType
+      }
+      if (res.deployKey) {
+        deployedUrl.value = `http://localhost:8123/app/${res.deployKey}/`
       }
     } else {
       message.error('应用不存在')
@@ -75,33 +80,33 @@ const loadHistory = async (isLoadMore = false) => {
       pageSize: 10,
       lastCreateTime: isLoadMore ? lastCreateTime.value : undefined
     })
-    
+
     if (res && res.records && res.records.length > 0) {
       // Backend returns newest first (DESC by createTime)
       // We want to prepend them to our messages list
-      
+
       const newMessages: Message[] = res.records.map((item: ChatHistoryVO) => ({
-        role: item.messageType === 1 ? 'ai' : 'user',
+        role: item.messageType === 'aiMessage' ? 'ai' : 'user',
         content: item.content
       }))
-      
+
       // Reverse to get chronological order (oldest to newest)
       newMessages.reverse()
-      
+
       if (isLoadMore) {
         messages.value.unshift(...newMessages)
       } else {
         messages.value = newMessages
       }
-      
+
       // Update cursor (the oldest message in the newly fetched batch)
       // Since backend returned [Newest ... Oldest], the last item in res.records is the oldest
       const oldestRecord = res.records[res.records.length - 1]!
       lastCreateTime.value = oldestRecord.createTime
-      
+
       // If we got a full page, assume there might be more
       hasMore.value = res.records.length >= 10
-      
+
       if (!isLoadMore) {
         scrollToBottom()
       }
@@ -115,17 +120,64 @@ const loadHistory = async (isLoadMore = false) => {
   }
 }
 
+// 自动部署超时计时器
+let deployTimeoutTimer: number | null = null;
+
+const resetDeployTimeout = () => {
+  if (deployTimeoutTimer) {
+    clearTimeout(deployTimeoutTimer);
+  }
+  // 如果 60 秒没有收到新消息，强制结束并部署
+  deployTimeoutTimer = setTimeout(() => {
+    console.log('SSE Stream timeout, forcing deploy...');
+    forceDeploy();
+  }, 60000); // 60s 超时
+};
+
+const forceDeploy = async () => {
+  if (eventSourceRef.value) {
+    eventSourceRef.value.close();
+  }
+  if (messages.value[aiMsgIndexRef.value]) {
+    messages.value[aiMsgIndexRef.value]!.loading = false;
+  }
+
+  if (app.value) {
+      try {
+        deploying.value = true
+        message.loading({ content: '生成完毕（或长时间未响应），正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...', key: 'auto_deploy', duration: 0 })
+        const url = await deployApp({ appId: app.value.id })
+        if (url) {
+          deployedUrl.value = url
+          message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
+        }
+      } catch (e) {
+        message.error({ content: '自动部署失败', key: 'auto_deploy' })
+      } finally {
+        deploying.value = false
+        // 刷新历史记录
+        loadHistory(false)
+      }
+    } else {
+      loadHistory(false)
+    }
+};
+
 // SSE Generation
+let eventSourceRef = ref<EventSource | null>(null);
+let aiMsgIndexRef = ref<number>(0);
+
 const onGenerate = async (prompt: string) => {
   if (!app.value || !prompt) return
-  
+
   // Add User Message
   messages.value.push({ role: 'user', content: prompt })
   inputPrompt.value = ''
-  
+
   // Add AI Placeholder
   const aiMsgIndex = messages.value.push({ role: 'ai', content: '', loading: true }) - 1
-  
+  aiMsgIndexRef.value = aiMsgIndex;
+
   scrollToBottom()
 
   // Start SSE
@@ -138,8 +190,15 @@ const onGenerate = async (prompt: string) => {
     `/api/app/chat/gen/code?appId=${appId}&userMessage=${encodeURIComponent(prompt)}&codeGenType=${type}`,
     { withCredentials: true }
   )
+  eventSourceRef.value = eventSource;
+
+  // 启动超时计时器
+  resetDeployTimeout();
 
   eventSource.onmessage = (event) => {
+    // 收到任意消息都重置超时计时器
+    resetDeployTimeout();
+
     try {
       // 1. Check if the event data is a valid JSON string
       let data;
@@ -175,25 +234,51 @@ const onGenerate = async (prompt: string) => {
     scrollToBottom()
   }
 
-  eventSource.addEventListener('done', () => {
+  eventSource.addEventListener('done', async () => {
+    if (deployTimeoutTimer) clearTimeout(deployTimeoutTimer);
     messages.value[aiMsgIndex]!.loading = false
     eventSource.close()
-    refreshPreview()
-    // 生成完成后刷新历史记录
-    loadHistory(false)
+
+    // 自动部署逻辑
+    if (app.value) {
+      try {
+        deploying.value = true
+        message.loading({ content: '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...', key: 'auto_deploy', duration: 0 })
+        const url = await deployApp({ appId: app.value.id })
+        if (url) {
+          deployedUrl.value = url
+          message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
+        }
+      } catch (e) {
+        message.error({ content: '自动部署失败', key: 'auto_deploy' })
+      } finally {
+        deploying.value = false
+        // 刷新历史记录
+        loadHistory(false)
+      }
+    } else {
+      loadHistory(false)
+    }
   })
-  
+
   // EventSource 'error' events do not provide data payload; rely on onerror handler below
 
   eventSource.onerror = (event) => {
+    if (deployTimeoutTimer) clearTimeout(deployTimeoutTimer);
     console.error('SSE Error', event)
     eventSource.close()
     if (messages.value[aiMsgIndex]!.loading) {
         messages.value[aiMsgIndex]!.loading = false
-        messages.value[aiMsgIndex]!.content += '\n[生成出错]'
+        messages.value[aiMsgIndex]!.content += '\n[生成出错或连接中断]'
     }
     // 出错也尝试刷新历史记录，捕获后端已保存的错误信息
     loadHistory(false)
+
+    // 如果出错时已经生成了部分内容，尝试部署
+    if (app.value && messages.value[aiMsgIndex]!.content.length > 100) {
+        // 只有内容足够长才尝试自动部署
+        forceDeploy();
+    }
   }
 }
 
@@ -238,7 +323,7 @@ const onSendMessage = () => {
 onMounted(async () => {
   await loadAppInfo()
   await loadHistory(false)
-  
+
   const initPrompt = route.query.initPrompt
     ? decodeURIComponent(route.query.initPrompt as string)
     : ''
@@ -251,7 +336,7 @@ onMounted(async () => {
     const newQuery = { ...route.query }
     delete newQuery.initPrompt
     delete newQuery.chatOnly
-    
+
     router.replace({ query: newQuery })
     onGenerate(initPrompt)
   }
@@ -284,9 +369,9 @@ onMounted(async () => {
           <div v-if="hasMore" class="load-more">
              <a-button type="link" size="small" :loading="historyLoading" @click="loadHistory(true)">加载更多历史消息</a-button>
           </div>
-          <div 
-            v-for="(msg, index) in messages" 
-            :key="index" 
+          <div
+            v-for="(msg, index) in messages"
+            :key="index"
             :class="['message', msg.role]"
           >
             <div class="avatar">
@@ -321,7 +406,7 @@ onMounted(async () => {
             <div v-if="messages.some(m => m.loading)" class="preview-loading">
                 <a-spin tip="正在生成代码中，请稍候..." />
             </div>
-            <!-- 
+            <!--
                 Show iframe if:
                 1. App info is loaded
                 2. Not currently generating (loading handled by overlay above)
@@ -329,10 +414,10 @@ onMounted(async () => {
                 4. AND: We have at least some history OR the app is deployed/featured (priority > 0)
                    OR simply always show it and let it 404 if not found (better for existing apps with lost history)
             -->
-            <iframe 
+            <iframe
                 v-if="app && !messages.some(m => m.loading)"
                 ref="iframeRef"
-                :src="previewUrl" 
+                :src="previewUrl"
                 title="App Preview"
                 style="width: 100%; height: 100%; border: none;"
             ></iframe>

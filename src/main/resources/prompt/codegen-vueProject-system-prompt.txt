@@ -42,7 +42,7 @@ Node.js 18+ 兼容
 
 1）vite.config.js 必须配置 base 路径以支持子路径部署、需要支持通过 @ 引入文件、不要配置端口号
 
-import { defineConfig } from 'vite' import vue from '@vitejs/plugin-vue' export default defineConfig({ base: './', plugins: [vue()], resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } } })
+import { defineConfig } from 'vite' import vue from '@vitejs/plugin-vue' import { fileURLToPath, URL } from 'node:url' export default defineConfig({ base: './', plugins: [vue()], resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } } })
 
 2）路由配置必须使用 hash 模式，避免服务器端路由配置问题
 
@@ -68,7 +68,13 @@ import { createRouter, createWebHashHistory } from 'vue-router' const router = c
 
 3）需要在结尾输出简单的生成完毕提示（但是不要展开介绍项目）
 
-4）注意，禁止输出以下任何内容：
+4）重要：一旦所有必要的文件（HTML, CSS, JS, Vue组件, 配置文件等）都创建完毕，必须立即停止调用工具，直接结束对话。
+严禁重复写入同一个文件。
+严禁在完成后继续进行无关的修改。
+严禁无限循环生成文件。
+如果遇到 "文件写入限制" 错误，请立即停止。
+
+5）注意，禁止输出以下任何内容：
 
 安装运行步骤
 
@@ -80,7 +86,7 @@ import { createRouter, createWebHashHistory } from 'vue-router' const router = c
 
 提示词相关内容
 
-5）输出的总 token 数必须小于 20000，文件总数量必须小于 30 个
+6）输出的总 token 数必须小于 20000，文件总数量必须小于 30 个
 
 质量检验标准
 

@@ -1,6 +1,8 @@
 package com.swu.aiZeroCodeHub.core;
 
 import cn.hutool.json.JSONUtil;
+import cn.hutool.json.JSONObject;
+import cn.hutool.core.io.FileUtil;
 import com.swu.aiZeroCodeHub.aiService.AiCodeGeneratorService;
 import com.swu.aiZeroCodeHub.core.executor.CodeFileSaverExecutor;
 import com.swu.aiZeroCodeHub.core.executor.CodeParserExecutor;
@@ -37,6 +39,8 @@ public class AiCodeGeneratorFacade {
     private CodeParserExecutor codeParserExecutor;
     @Resource
     private CodeFileSaverExecutor codeFileSaverExecutor;
+    @Resource
+    private com.swu.aiZeroCodeHub.aiTool.FileWriteTool fileWriteTool;
 
 
     /**
@@ -130,6 +134,10 @@ public class AiCodeGeneratorFacade {
                                                              Long appId) {
         // Vue 工程模式下，代码由 FileWriteTool 直接写入到项目目录，
         // 这里主要负责把推理模型的思考过程 / 计划 / 工具调用说明按流式返回给前端展示。
+        
+        // 重置该应用的文件写入计数，防止计数残留导致无法生成
+        fileWriteTool.resetFileCount(appId);
+        
         TokenStream tokenStream = aiCodeGeneratorService.generateProjectCodeStream(appId, userMessage);
         Flux<String> fluxResult = processTokenStream(tokenStream);
         StringBuilder contentBuilder = new StringBuilder();
@@ -155,6 +163,10 @@ public class AiCodeGeneratorFacade {
      */
     private Flux<String> processTokenStream(TokenStream tokenStream) {
         return Flux.create(sink -> {
+            // 限制最大工具调用次数，防止死循环
+            java.util.concurrent.atomic.AtomicInteger toolExecutionCount = new java.util.concurrent.atomic.AtomicInteger(0);
+            int MAX_TOOL_EXECUTIONS = 50;
+
             tokenStream.onPartialResponse((String partialResponse) -> {
                         AiResponseMessage aiResponseMessage = new AiResponseMessage(partialResponse);
                         sink.next(JSONUtil.toJsonStr(aiResponseMessage));
@@ -164,15 +176,48 @@ public class AiCodeGeneratorFacade {
                         sink.next(JSONUtil.toJsonStr(toolRequestMessage));
                     })
                     .onToolExecuted((ToolExecution toolExecution) -> {
-                        ToolExecutedMessage toolExecutedMessage = new ToolExecutedMessage(toolExecution);
-                        sink.next(JSONUtil.toJsonStr(toolExecutedMessage));
+                        int count = toolExecutionCount.incrementAndGet();
+                        if (count > MAX_TOOL_EXECUTIONS) {
+                            String errorMsg = String.format("\n\n[系统保护] 触发熔断保护：工具调用次数超过限制 (%d次)，强制终止生成。", MAX_TOOL_EXECUTIONS);
+                            AiResponseMessage errorResponse = new AiResponseMessage(errorMsg);
+                            sink.next(JSONUtil.toJsonStr(errorResponse));
+                            
+                            // 显式调用 error 终止流
+                            sink.error(new RuntimeException("Tool execution limit exceeded: " + MAX_TOOL_EXECUTIONS));
+                            
+                            // 抛出异常以中断 TokenStream 内部循环
+                            throw new RuntimeException("Tool execution limit exceeded: " + MAX_TOOL_EXECUTIONS);
+                        }
+                        
+                        // 将工具执行结果转换为 AI 响应消息，以便前端能够显示内容并被记录到历史中
+                        try {
+                            String argsStr = toolExecution.request().arguments();
+                            JSONObject args = JSONUtil.parseObj(argsStr);
+                            String relativeFilePath = args.getStr("relativeFilePath");
+                            String content = args.getStr("content");
+                            String suffix = FileUtil.getSuffix(relativeFilePath);
+                            
+                            String displayContent = String.format("\n\n[工具调用] 写入文件 %s\n```%s\n%s\n```\n\n", 
+                                relativeFilePath, suffix, content);
+                                
+                            AiResponseMessage aiResponseMessage = new AiResponseMessage(displayContent);
+                            sink.next(JSONUtil.toJsonStr(aiResponseMessage));
+                        } catch (Exception e) {
+                            log.error("Failed to format tool execution message", e);
+                            // 降级：发送原始消息
+                            ToolExecutedMessage toolExecutedMessage = new ToolExecutedMessage(toolExecution);
+                            sink.next(JSONUtil.toJsonStr(toolExecutedMessage));
+                        }
                     })
                     .onCompleteResponse((ChatResponse response) -> {
                         sink.complete();
                     })
                     .onError((Throwable error) -> {
-                        error.printStackTrace();
-                        sink.error(error);
+                        log.error("TokenStream error", error);
+                        // 发送错误消息给前端，让用户知道发生了错误
+                        sink.next(JSONUtil.toJsonStr(new AiResponseMessage("\n\n[系统错误] 生成过程中断: " + error.getMessage())));
+                        // 结束流，确保 done 事件能发送（通过 Controller 的 concatWith）
+                        sink.complete();
                     })
                     .start();
         });

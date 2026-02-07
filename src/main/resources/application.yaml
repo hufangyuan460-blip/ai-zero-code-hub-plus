@@ -61,4 +61,11 @@ langchain4j:
         max-tokens: 8192
 
 
-
+# 添加COS对象存储配置（需要从腾讯云获取）
+cos:
+  client:
+    host: https://ai-zero-code-hub-1403407939.cos.ap-chongqing.myqcloud.com
+    secretId: AKIDfDZhcKyVs8HDya2MZaO2Vn00oQs76ynU
+    secretKey: ${TENCENT_CLOUD_SECRET_KEY}
+    region: ap-chongqing
+    bucket: ai-zero-code-hub-1403407939
