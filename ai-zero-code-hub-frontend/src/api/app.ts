@@ -83,6 +83,14 @@ export const createApp = async (data: AppCreateRequest) => {
 }
 
 /**
+ * Capture screenshot and upload to COS, return cover URL
+ */
+export const captureAndUploadScreenshot = async (appId: string | number, webUrl: string) => {
+  const res = await request.post<any>('/app/screenshot', { appId, webUrl })
+  return unwrapBaseResponse<string>(res)
+}
+
+/**
  * Update My App
  */
 export const updateMyApp = async (data: AppUpdateMyRequest) => {

@@ -2,7 +2,7 @@
 import { ref, onMounted, nextTick, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { getMyAppInfo, deployApp, getDownloadLink, type AppVO } from '@/api/app'
+import { getMyAppInfo, deployApp, getDownloadLink, captureAndUploadScreenshot, type AppVO } from '@/api/app'
 import { listChatHistoryByPage, type ChatHistoryVO } from '@/api/chat'
 import { request } from '@/api/request'
 import { useUserStore } from '@/stores/user'
@@ -19,7 +19,7 @@ const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
 const deployedUrl = ref<string>('')
-const codeGenType = ref('vue_project')
+const codeGenType = ref('html')
 const codeGenTypeMap: Record<string, string> = {
   html: '原生 HTML',
   multi_file: '原生多文件',
@@ -69,6 +69,9 @@ const iframeRef = ref<HTMLIFrameElement>()
 const downloading = ref(false)
 const downloadStatus = ref<'idle' | 'preparing' | 'downloading' | 'success' | 'error'>('idle')
 const downloadProgress = ref(0)
+const previewReady = ref(false)
+const coverUpdating = ref(false)
+const deployingManual = ref(false)
 const downloadText = computed(() => {
   if (downloadStatus.value === 'preparing') return '准备中'
   if (downloadStatus.value === 'downloading') return '下载中'
@@ -76,6 +79,8 @@ const downloadText = computed(() => {
   if (downloadStatus.value === 'error') return '重试下载'
   return '下载源码'
 })
+const downloadDisabled = computed(() => !deployedUrl.value || !previewReady.value || deploying.value || downloading.value)
+const manualDeployDisabled = computed(() => deploying.value || deployingManual.value || loading.value)
 
 // Fetch App Info
 const loadAppInfo = async (silent = false) => {
@@ -87,13 +92,13 @@ const loadAppInfo = async (silent = false) => {
     const res = await getMyAppInfo(appId)
     if (res) {
       app.value = res
-      // 强制使用 Vue 工程项目类型，确保触发工具调用与部署链路
-      codeGenType.value = 'vue_project'
+      codeGenType.value = res.codeGenType || 'html'
       if (res.deployKey && res.deployedTime) {
         deployedUrl.value = `/api/app/${res.deployKey}/index.html`
       } else {
         deployedUrl.value = ''
       }
+      previewReady.value = false
     } else {
       message.error('应用不存在')
     }
@@ -189,6 +194,7 @@ const forceDeploy = async () => {
         if (url) {
           deployedUrl.value = url
           message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
+          await handleDeploymentComplete(url)
         }
       } catch (e) {
         message.error({ content: '自动部署失败', key: 'auto_deploy' })
@@ -200,6 +206,9 @@ const forceDeploy = async () => {
     } else {
       deployedUrl.value = ''
       refreshPreview()
+      if (!app.value?.cover) {
+        await handleDeploymentComplete(previewUrl.value)
+      }
       loadHistory(false)
     }
 };
@@ -297,6 +306,7 @@ const onGenerate = async (prompt: string) => {
         if (url) {
           deployedUrl.value = url
           message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
+          await handleDeploymentComplete(url)
         }
       } catch (e) {
         message.error({ content: '自动部署失败', key: 'auto_deploy' })
@@ -308,6 +318,9 @@ const onGenerate = async (prompt: string) => {
     } else {
       deployedUrl.value = ''
       refreshPreview()
+      if (!app.value?.cover) {
+        await handleDeploymentComplete(previewUrl.value)
+      }
       loadHistory(false)
     }
   })
@@ -371,6 +384,10 @@ const saveBlob = (blob: Blob, fileName: string) => {
 }
 
 const handleDownload = async () => {
+  if (downloadDisabled.value) {
+    message.warning('部署完成并预览可用后才能下载')
+    return
+  }
   if (!app.value) return
   downloading.value = true
   downloadStatus.value = 'preparing'
@@ -406,6 +423,39 @@ const handleDownload = async () => {
         downloadProgress.value = 0
       }, 1500)
     }
+  }
+}
+
+const handleManualDeploy = async () => {
+  if (!app.value) return
+  deployingManual.value = true
+  try {
+    message.loading({ content: '正在部署...', key: 'manual_deploy', duration: 0 })
+    const url = await deployApp({ appId: app.value.id })
+    if (url) {
+      deployedUrl.value = url
+      message.success({ content: '部署成功，已更新预览', key: 'manual_deploy' })
+      await handleDeploymentComplete(url)
+    }
+  } catch (e) {
+    message.error({ content: '部署失败', key: 'manual_deploy' })
+  } finally {
+    deployingManual.value = false
+  }
+}
+
+const handleDeploymentComplete = async (url: string) => {
+  if (!app.value || !url || coverUpdating.value) return
+  try {
+    coverUpdating.value = true
+    const coverUrl = await captureAndUploadScreenshot(app.value.id, url)
+    if (coverUrl) {
+      app.value.cover = coverUrl
+    }
+  } catch (e) {
+    message.warning('封面更新失败')
+  } finally {
+    coverUpdating.value = false
   }
 }
 
@@ -463,6 +513,7 @@ onMounted(async () => {
 // }
 
 const onIframeLoad = () => {
+  previewReady.value = !!deployedUrl.value
   if (isEditMode.value && iframeRef.value) {
     initVisualEditor(iframeRef.value)
     // Re-enable edit mode in the new iframe document
@@ -471,6 +522,10 @@ const onIframeLoad = () => {
     }, 100)
   }
 }
+
+watch(deployedUrl, () => {
+  previewReady.value = false
+})
 </script>
 
 <template>
@@ -488,7 +543,8 @@ const onIframeLoad = () => {
       </div>
       <div class="right">
         <div class="download-wrap">
-          <a-button :loading="downloading" @click="handleDownload">{{ downloadText }}</a-button>
+          <a-button :loading="deployingManual" :disabled="manualDeployDisabled" @click="handleManualDeploy">手动部署</a-button>
+          <a-button :loading="downloading" :disabled="downloadDisabled" @click="handleDownload">{{ downloadText }}</a-button>
           <a-progress v-if="downloadStatus === 'downloading' && downloadProgress > 0" :percent="downloadProgress" size="small" :show-info="false" />
           <span v-else-if="downloadStatus === 'error'" class="download-error">下载失败</span>
         </div>

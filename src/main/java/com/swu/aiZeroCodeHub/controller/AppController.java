@@ -17,7 +17,9 @@ import com.swu.aiZeroCodeHub.model.dto.app.AppFeaturedQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppMyQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
 import com.swu.aiZeroCodeHub.model.entity.App;
+import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.service.ProjectDownloadService;
+import com.swu.aiZeroCodeHub.service.ScreenshotService;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import com.swu.aiZeroCodeHub.service.AppService;
@@ -40,6 +42,8 @@ import com.swu.aiZeroCodeHub.model.entity.User;
 import reactor.core.publisher.Mono;
 
 import java.io.File;
+import java.time.LocalDateTime;
+import java.util.LinkedHashSet;
 
 /**
  * 应用 控制层。
@@ -56,6 +60,8 @@ public class AppController {
     private UserService userService;
     @Autowired
     private ProjectDownloadService projectDownloadService;
+    @Autowired
+    private ScreenshotService screenshotService;
 
     /**
      * 用户创建应用（必须填写 initPrompt）。
@@ -197,6 +203,42 @@ public class AppController {
         return ResultUtils.success(url);
     }
 
+    @PostMapping("/screenshot")
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public BaseResponse<String> screenshot(@RequestBody java.util.Map<String, String> body, HttpServletRequest request) {
+        String appIdStr = body.get("appId");
+        String webUrl = body.get("webUrl");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appIdStr == null, ErrorCode.PARAM_ERROR, "应用ID不能为空");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(webUrl), ErrorCode.PARAM_ERROR, "网页URL不能为空");
+        Long appId = Long.valueOf(appIdStr);
+
+        App app = appService.getById(appId);
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
+        User loginUser = userService.getLoginUser(request);
+        if (!app.getUserId().equals(loginUser.getId())) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限操作该应用");
+        }
+
+        String fullUrl = webUrl;
+        if (StrUtil.isNotBlank(webUrl) && !webUrl.startsWith("http://") && !webUrl.startsWith("https://")) {
+            String path = webUrl.startsWith("/") ? webUrl : "/" + webUrl;
+            String scheme = request.getScheme();
+            String host = request.getServerName();
+            int port = request.getServerPort();
+            boolean defaultPort = ("http".equalsIgnoreCase(scheme) && port == 80)
+                    || ("https".equalsIgnoreCase(scheme) && port == 443);
+            String portPart = defaultPort ? "" : ":" + port;
+            fullUrl = scheme + "://" + host + portPart + path;
+        }
+        String coverUrl = screenshotService.generateAndUploadScreenshot(appId, fullUrl);
+        App updateApp = new App();
+        updateApp.setId(appId);
+        updateApp.setCover(coverUrl);
+        updateApp.setEditTime(LocalDateTime.now());
+        appService.updateById(updateApp);
+        return ResultUtils.success(coverUrl);
+    }
+
     /**
      * 获取下载链接（带时效）
      * @param appId 应用ID
@@ -216,11 +258,8 @@ public class AppController {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限下载该应用代码");
         }
 
-        String codeGenType = app.getCodeGenType();
-        String sourceDirName = codeGenType + "_" + appId;
-        String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
-        File sourceDir = new File(sourceDirPath);
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!sourceDir.exists() || !sourceDir.isDirectory(),
+        File sourceDir = resolveCodeOutputDir(appId, app.getCodeGenType());
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(sourceDir == null,
                 ErrorCode.NOT_FOUND_ERROR, "应用代码不存在，请先生成代码");
 
         String token = projectDownloadService.createDownloadToken(appId, loginUser.getId());
@@ -260,20 +299,35 @@ public class AppController {
         }
 
         // 4. 构建应用代码目录路径（生成目录，非部署目录）
-        String codeGenType = app.getCodeGenType();
-        String sourceDirName = codeGenType + "_" + appId;
-        String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
-
         // 5. 检查代码目录是否存在
-        File sourceDir = new File(sourceDirPath);
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!sourceDir.exists() || !sourceDir.isDirectory(),
+        File sourceDir = resolveCodeOutputDir(appId, app.getCodeGenType());
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(sourceDir == null,
                 ErrorCode.NOT_FOUND_ERROR, "应用代码不存在，请先生成代码");
 
         // 6. 生成下载文件名（不建议添加中文内容）
         String downloadFileName = String.valueOf(appId);
 
         // 7. 调用通用下载服务
-        projectDownloadService.downloadProjectAsZip(sourceDirPath, downloadFileName, request, response);
+        projectDownloadService.downloadProjectAsZip(sourceDir.getAbsolutePath(), downloadFileName, request, response);
+    }
+
+    private File resolveCodeOutputDir(Long appId, String preferredType) {
+        LinkedHashSet<String> types = new LinkedHashSet<>();
+        if (StrUtil.isNotBlank(preferredType)) {
+            types.add(preferredType);
+        }
+        types.add(CodeGenTypeEnum.VUE_PROJECT.getValue());
+        types.add(CodeGenTypeEnum.MULTI_FILE.getValue());
+        types.add(CodeGenTypeEnum.HTML.getValue());
+        for (String type : types) {
+            String sourceDirName = type + "_" + appId;
+            String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
+            File sourceDir = new File(sourceDirPath);
+            if (sourceDir.exists() && sourceDir.isDirectory()) {
+                return sourceDir;
+            }
+        }
+        return null;
     }
 
 

@@ -5,6 +5,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -76,9 +78,11 @@ public class VueProjectBuilder {
     /**
      * 执行 npm run build。
      */
-    private boolean executeNpmBuild(File projectDir) {
+    private boolean executeNpmBuild(File projectDir, boolean useRelativeBase) {
         log.info("开始执行 npm run build，目录：{}", projectDir);
-        String command = String.format("%s run build", buildCommand("npm"));
+        String command = useRelativeBase
+                ? String.format("%s run build -- --base=./", buildCommand("npm"))
+                : String.format("%s run build", buildCommand("npm"));
         // 3 分钟超时
         return executeCommand(projectDir, command, 180);
     }
@@ -123,8 +127,18 @@ public class VueProjectBuilder {
             return false;
         }
 
-        // 执行npm run build
-        if (!executeNpmBuild(projectDir)) {
+        boolean useRelativeBase = isViteProject(packageJson);
+        boolean buildSuccess;
+        if (useRelativeBase) {
+            buildSuccess = executeNpmBuild(projectDir, true);
+            if (!buildSuccess) {
+                log.error("npm run build --base=./ 执行失败，尝试默认构建");
+                buildSuccess = executeNpmBuild(projectDir, false);
+            }
+        } else {
+            buildSuccess = executeNpmBuild(projectDir, false);
+        }
+        if (!buildSuccess) {
             log.error("npm run build执行失败");
             return false;
         }
@@ -138,6 +152,18 @@ public class VueProjectBuilder {
 
         log.info("Vue项目构建成功，dist目录: {}", distDir.getAbsolutePath());
         return true;
+    }
+
+    private boolean isViteProject(File packageJson) {
+        try {
+            String content = Files.readString(packageJson.toPath(), StandardCharsets.UTF_8);
+            return content.contains("\"vite\"")
+                    || content.contains("@vitejs/plugin-vue")
+                    || content.contains("vite build");
+        } catch (Exception e) {
+            log.error("读取package.json失败: {}", e.getMessage(), e);
+            return false;
+        }
     }
 
     /**
@@ -158,4 +184,3 @@ public class VueProjectBuilder {
                 });
     }
 }
-

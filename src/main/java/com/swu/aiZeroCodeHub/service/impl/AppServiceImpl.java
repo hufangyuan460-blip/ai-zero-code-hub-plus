@@ -38,6 +38,7 @@ import reactor.core.publisher.Flux;
 import java.io.File;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -426,6 +427,14 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         if (codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "不支持的代码生成类型");
         }
+        if (StrUtil.isNotBlank(codeGenType) && !codeGenType.equals(app.getCodeGenType())) {
+            App updateApp = new App();
+            updateApp.setId(appId);
+            updateApp.setCodeGenType(codeGenType);
+            updateApp.setEditTime(LocalDateTime.now());
+            this.updateById(updateApp);
+            app.setCodeGenType(codeGenType);
+        }
 
         // 1. 保存用户消息
         saveChatHistory(appId, message, ChatHistoryMessageTypeEnum.USER, loginUser);
@@ -482,18 +491,16 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         String deployKey = app.getDeployKey();
         //6位大小写加数字
         if (StrUtil.isBlank(deployKey)) {
-            deployKey = RandomUtil.randomString(6);
+            deployKey = appId + "-" + RandomUtil.randomString(4);
         }
 
-        //获取代码类型，构建源目录
-        String codeGenType = app.getCodeGenType();
-        String sourceDirName=codeGenType+"_"+appId;
-        String sourceDirPath= AppConstant.CODE_OUTPUT_ROOT_DIR+ File.separator+sourceDirName;
-        //检查目录是否存在,而非文件或者不存在
-        File sourceDir=new File(sourceDirPath);
-        if (!sourceDir.exists()||!sourceDir.isDirectory()) {
+        CodeOutputResolveResult resolveResult = resolveCodeOutputDir(appId, app.getCodeGenType());
+        if (resolveResult == null) {
             throw new BusinessException(ErrorCode.PARAM_ERROR,"应用代码不存在，请先生成代码");
         }
+        String codeGenType = resolveResult.codeGenType;
+        File sourceDir = resolveResult.dir;
+        String sourceDirPath = sourceDir.getAbsolutePath();
 
         //! 如果部署的是vue项目，使用单独部署器部署
         // 7. Vue项目特殊处理：执行构建
@@ -527,11 +534,43 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         updatedApp.setId(appId);
         updatedApp.setDeployKey(deployKey);
         updatedApp.setDeployedTime(LocalDateTime.now());
+        if (!codeGenType.equals(app.getCodeGenType())) {
+            updatedApp.setCodeGenType(codeGenType);
+        }
         boolean updateResult = this.updateById(updatedApp);
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!updateResult,ErrorCode.OPERATION_ERROR,"更新应用部署信息失败");
         //返回可访问URL
-        return String.format("%s/%s/",AppConstant.CODE_DEPLOY_HOST,deployKey);
+        return String.format("/api/app/%s/index.html",deployKey);
 
+    }
+
+    private CodeOutputResolveResult resolveCodeOutputDir(Long appId, String preferredType) {
+        LinkedHashSet<String> types = new LinkedHashSet<>();
+        if (StrUtil.isNotBlank(preferredType)) {
+            types.add(preferredType);
+        }
+        types.add(CodeGenTypeEnum.VUE_PROJECT.getValue());
+        types.add(CodeGenTypeEnum.MULTI_FILE.getValue());
+        types.add(CodeGenTypeEnum.HTML.getValue());
+        for (String type : types) {
+            String sourceDirName = type + "_" + appId;
+            String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
+            File sourceDir = new File(sourceDirPath);
+            if (sourceDir.exists() && sourceDir.isDirectory()) {
+                return new CodeOutputResolveResult(type, sourceDir);
+            }
+        }
+        return null;
+    }
+
+    private static class CodeOutputResolveResult {
+        private final String codeGenType;
+        private final File dir;
+
+        private CodeOutputResolveResult(String codeGenType, File dir) {
+            this.codeGenType = codeGenType;
+            this.dir = dir;
+        }
     }
 
 
