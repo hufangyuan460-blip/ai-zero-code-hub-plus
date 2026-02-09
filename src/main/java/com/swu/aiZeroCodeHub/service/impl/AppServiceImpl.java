@@ -2,7 +2,6 @@ package com.swu.aiZeroCodeHub.service.impl;
 
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import com.mybatisflex.core.paginate.Page;
 import com.mybatisflex.core.query.QueryWrapper;
@@ -30,6 +29,7 @@ import com.swu.aiZeroCodeHub.service.AppService;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import com.swu.aiZeroCodeHub.service.ScreenshotService;
 import com.swu.aiZeroCodeHub.service.UserService;
+import com.swu.aiZeroCodeHub.aiTool.FileWriteTool;
 import jakarta.annotation.Resource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -38,6 +38,8 @@ import reactor.core.publisher.Flux;
 
 import java.io.File;
 import java.time.LocalDateTime;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -78,6 +80,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     private VueProjectBuilder vueProjectBuilder;
     @Autowired
     private ScreenshotService screenshotService;
+    @Autowired
+    private FileWriteTool fileWriteTool;
 
     @Override
     public long createApp(AppCreateRequest appCreateRequest, jakarta.servlet.http.HttpServletRequest request) {
@@ -307,6 +311,15 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         }
         AppVO appVo = new AppVO();
         BeanUtils.copyProperties(app, appVo);
+        String cover = appVo.getCover();
+        String localCover = String.format("/api/static/covers/%d.jpg", appVo.getId());
+        String localCoverPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + "covers" + File.separator + appVo.getId() + ".jpg";
+        if (cover == null || cover.isBlank() || cover.contains("/screenshots/")) {
+            File localFile = new File(localCoverPath);
+            if (localFile.exists() && localFile.isFile() && localFile.length() > 0) {
+                appVo.setCover(localCover);
+            }
+        }
         return appVo;
     }
 
@@ -437,8 +450,43 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         // 2. 调用AI生成，并捕获响应流
         Flux<String> fluxResponse = aiCodeGeneratorFacade.generateAndSaveCodeStream(message, codeGenTypeEnum, appId);
 
-        //3. 调用流处理执行器处理流
-        return streamHandlerExecutor.doExecute(fluxResponse,chatHistoryService,appId,loginUser,codeGenTypeEnum);
+        Flux<String> handledFlux = streamHandlerExecutor.doExecute(fluxResponse,chatHistoryService,appId,loginUser,codeGenTypeEnum);
+        return handledFlux.doOnComplete(() -> {
+            Thread.startVirtualThread(() -> {
+                try {
+                    App latestApp = this.getById(appId);
+                    if (latestApp == null) {
+                        return;
+                    }
+                    String sourceDirName = codeGenTypeEnum.getValue() + "_" + appId;
+                    String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
+                    File sourceDir = new File(sourceDirPath);
+                    boolean dirReady = waitForDirectoryReady(sourceDir, 60, 1000L);
+                    if (!dirReady) {
+                        log.error("应用代码不存在，无法自动部署：{}", sourceDirPath);
+                        return;
+                    }
+                    if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
+                        boolean vueReady = waitForVueProjectReady(appId, sourceDirPath, 120, 1000L);
+                        if (!vueReady) {
+                            log.error("Vue 项目未就绪，无法自动部署：{}", sourceDirPath);
+                            return;
+                        }
+                        deployVueProject(appId, sourceDirName, sourceDirPath, latestApp);
+                    } else {
+                        File indexFile = new File(sourceDir, "index.html");
+                        boolean ready = waitForFileReady(indexFile, 20, 1000L);
+                        if (!ready) {
+                            log.error("index.html 未就绪，无法自动部署：{}", indexFile.getAbsolutePath());
+                            return;
+                        }
+                        deployStandardProject(appId, sourceDirName, sourceDir, latestApp);
+                    }
+                } catch (Exception e) {
+                    log.error("自动部署并生成封面失败，appId: {}", appId, e);
+                }
+            });
+        });
     }
 
 
@@ -481,16 +529,15 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限部署应用");
         }
 
-        // 生成或获取部署密钥
-        String deployKey = app.getDeployKey();
-        if (StrUtil.isBlank(deployKey)) {
-            deployKey = RandomUtil.randomString(6);
-        }
-
         // 获取源代码目录
         String codeGenType = app.getCodeGenType();
-        String sourceDirName = codeGenType + "_" + appId;
+        CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(codeGenType);
+        if (codeGenTypeEnum == null) {
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "不支持的代码生成类型");
+        }
+        String sourceDirName = codeGenTypeEnum.getValue() + "_" + appId;
         String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
+        String deployKey = sourceDirName;
 
         File sourceDir = new File(sourceDirPath);
         if (!sourceDir.exists() || !sourceDir.isDirectory()) {
@@ -498,7 +545,6 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         }
 
         // Vue项目特殊处理
-        CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(codeGenType);
         if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
             return deployVueProject(appId, deployKey, sourceDirPath, app);
         } else {
@@ -514,6 +560,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             log.info("开始部署Vue项目，appId: {}, sourceDir: {}", appId, sourceDirPath);
 
             // 1. 构建Vue项目
+            boolean ready = waitForVueProjectReady(appId, sourceDirPath, 90, 1000L);
+            if (!ready) {
+                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "Vue项目生成未完成，无法部署");
+            }
             log.info("执行Vue项目构建...");
             boolean buildSuccess = vueProjectBuilder.buildProject(sourceDirPath);
             if (!buildSuccess) {
@@ -588,7 +638,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             updateAppDeployInfo(appId, deployKey);
 
             // 部署地址
-            String appDeployUrl = String.format("%s/%s/", AppConstant.CODE_DEPLOY_HOST, deployKey);
+            String appDeployUrl = String.format("%s/%s/index.html", AppConstant.CODE_DEPLOY_HOST, deployKey);
             //异步截图生成封面
             generateAppScreenshotAsync(appId, appDeployUrl);
             log.info("Vue项目部署成功，访问地址: {}", appDeployUrl);
@@ -625,7 +675,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             updateAppDeployInfo(appId, deployKey);
 
             // 部署地址
-            String appDeployUrl = String.format("%s/%s/", AppConstant.CODE_DEPLOY_HOST, deployKey);
+            String appDeployUrl = String.format("%s/%s/index.html", AppConstant.CODE_DEPLOY_HOST, deployKey);
             //异步截图生成封面
             generateAppScreenshotAsync(appId, appDeployUrl);
 
@@ -644,12 +694,28 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
      * @param appUrl
      */
     private void generateAppScreenshotAsync(Long appId, String appUrl) {
-        // 使用虚拟线程异步执行
+        generateAppScreenshotAsync(appId, appUrl, 2);
+    }
+
+    private void generateAppScreenshotAsync(Long appId, String appUrl, int retries) {
         Thread.startVirtualThread(() -> {
             try {
-                // 调用截图服务生成截图并上传
-                String screenshotUrl = screenshotService.generateAndUploadScreenshot(appUrl);
-                // 更新应用封面字段
+                boolean ready = waitForUrlReady(appUrl, 12, 3000L);
+                if (!ready) {
+                    if (retries > 0) {
+                        try {
+                            Thread.sleep(30000L);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                        generateAppScreenshotAsync(appId, appUrl, retries - 1);
+                    } else {
+                        log.error("封面截图页面未就绪，appId: {}，appUrl: {}", appId, appUrl);
+                    }
+                    return;
+                }
+                String screenshotUrl = screenshotService.generateAndUploadScreenshot(appId, appUrl);
                 App updateApp = new App();
                 updateApp.setId(appId);
                 updateApp.setCover(screenshotUrl);
@@ -663,6 +729,109 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
                 log.error("异步生成应用截图失败，appId: {}，appUrl: {}", appId, appUrl, e);
             }
         });
+    }
+
+    private boolean waitForFileReady(File file, int attempts, long sleepMs) {
+        for (int i = 0; i < attempts; i++) {
+            if (file.exists() && file.isFile() && file.length() > 0) {
+                return true;
+            }
+            try {
+                Thread.sleep(sleepMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private boolean waitForDirectoryReady(File dir, int attempts, long sleepMs) {
+        for (int i = 0; i < attempts; i++) {
+            if (dir.exists() && dir.isDirectory()) {
+                File[] files = dir.listFiles();
+                if (files != null && files.length > 0) {
+                    return true;
+                }
+            }
+            try {
+                Thread.sleep(sleepMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private boolean waitForUrlReady(String url, int attempts, long sleepMs) {
+        for (int i = 0; i < attempts; i++) {
+            int code = getStatusCode(url);
+            if (code >= 200 && code < 300) {
+                return true;
+            }
+            try {
+                Thread.sleep(sleepMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private int getStatusCode(String urlStr) {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(urlStr);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setRequestMethod("GET");
+            connection.setInstanceFollowRedirects(true);
+            return connection.getResponseCode();
+        } catch (Exception e) {
+            return -1;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private boolean waitForVueProjectReady(Long appId, String sourceDirPath, int attempts, long sleepMs) {
+        File projectDir = new File(sourceDirPath);
+        if (!projectDir.exists() || !projectDir.isDirectory()) {
+            return false;
+        }
+        File packageJson = new File(projectDir, "package.json");
+        File viteConfigJs = new File(projectDir, "vite.config.js");
+        File viteConfigTs = new File(projectDir, "vite.config.ts");
+        File srcDir = new File(projectDir, "src");
+        File mainJs = new File(srcDir, "main.js");
+        File mainTs = new File(srcDir, "main.ts");
+        File appVue = new File(srcDir, "App.vue");
+        for (int i = 0; i < attempts; i++) {
+            boolean filesReady = packageJson.exists()
+                    && (viteConfigJs.exists() || viteConfigTs.exists())
+                    && srcDir.exists()
+                    && (mainJs.exists() || mainTs.exists())
+                    && appVue.exists();
+            boolean statusReady = true;
+            if (fileWriteTool.hasGenerationStatus(appId)) {
+                statusReady = fileWriteTool.isGenerationCompleted(appId) && fileWriteTool.isWriteIdle(appId, 3000L);
+            }
+            if (filesReady && statusReady) {
+                return true;
+            }
+            try {
+                Thread.sleep(sleepMs);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
     }
 
     /**

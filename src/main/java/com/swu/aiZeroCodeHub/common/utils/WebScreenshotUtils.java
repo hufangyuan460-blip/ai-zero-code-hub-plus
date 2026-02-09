@@ -133,13 +133,33 @@ public class WebScreenshotUtils {
         }
     }
 
+    private static boolean isErrorPage(WebDriver driver) {
+        String title = StrUtil.blankToDefault(driver.getTitle(), "");
+        String source = StrUtil.blankToDefault(driver.getPageSource(), "");
+        String content = (title + " " + source).toLowerCase();
+        return content.contains("whitelabel error page")
+                || content.contains("404")
+                || content.contains("not found");
+    }
+
+    private static boolean openAndWait(WebDriver driver, String webUrl) {
+        try {
+            driver.get(webUrl);
+            waitForPageLoad(driver);
+            return !isErrorPage(driver);
+        } catch (Exception e) {
+            log.error("访问页面失败: {}", webUrl, e);
+            return false;
+        }
+    }
+
 
     /**
      * 生成网页截图
      * @param webUrl 网页URL
      * @return 压缩后的截图文件路径，失败返回null
      */
-    public static String saveWebPageScreenshot(String webUrl) {
+    public static synchronized String saveWebPageScreenshot(String webUrl) {
         if (StrUtil.isBlank(webUrl)) {
             log.error("网页URL不能为空");
             return null;
@@ -160,11 +180,19 @@ public class WebScreenshotUtils {
             String imageSavePath = rootPath + File.separator +
                     RandomUtil.randomNumbers(5) + IMAGE_SUFFIX;
 
-            // 访问网页
-            webDriver.get(webUrl);
-
-            // 等待页面加载完成
-            waitForPageLoad(webDriver);
+            boolean ok = false;
+            int attempts = 0;
+            while (!ok && attempts < 3) {
+                attempts++;
+                ok = openAndWait(webDriver, webUrl);
+                if (!ok) {
+                    Thread.sleep(1200L * attempts);
+                }
+            }
+            if (!ok) {
+                log.error("页面不可用，截图终止: {}", webUrl);
+                return null;
+            }
 
             // 截图
             byte[] screenshotBytes = ((TakesScreenshot) webDriver)

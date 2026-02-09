@@ -37,6 +37,7 @@ public interface StreamingChatModel {
 
         ChatRequest finalChatRequest = ChatRequest.builder()
                 .messages(chatRequest.messages())
+                .toolSpecifications(chatRequest.toolSpecifications())
                 .parameters(defaultRequestParameters().overrideWith(chatRequest.parameters()))
                 .build();
 

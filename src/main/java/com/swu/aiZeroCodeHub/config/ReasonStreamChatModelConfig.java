@@ -14,6 +14,8 @@ import org.springframework.context.annotation.Configuration;
 public class ReasonStreamChatModelConfig {
     private String baseUrl;
     private String apiKey;
+    private Integer maxTokens;
+    private Integer timeoutSeconds;
 
     /**
      * 流式推理模型（用于工程项目生成，带工具调用）
@@ -22,14 +24,18 @@ public class ReasonStreamChatModelConfig {
     @Bean
     public StreamingChatModel reasoningStreamingChatModel(){
         final String modelName = "deepseek-chat";
-        final int maxToken=8192;
+        final int maxToken = (maxTokens != null && maxTokens > 0) ? Math.min(maxTokens, 8192) : 8192;
+        final int timeout = (timeoutSeconds != null && timeoutSeconds > 0) ? timeoutSeconds : 180;
         return OpenAiStreamingChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl)
                 .modelName(modelName)
                 .maxTokens(maxToken)
+                .maxCompletionTokens(maxToken)
+                .strictTools(true)
                 .logResponses(true)
                 .logRequests(true)
+                .timeout(java.time.Duration.ofSeconds(timeout))
                 .build();
 
 

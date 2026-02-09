@@ -6,6 +6,7 @@ import com.swu.aiZeroCodeHub.common.ResultUtils;
 import com.swu.aiZeroCodeHub.common.vo.BaseResponse;
 import com.swu.aiZeroCodeHub.constant.AppConstant;
 import com.swu.aiZeroCodeHub.constant.UserConstant;
+import cn.hutool.core.util.StrUtil;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
@@ -17,7 +18,6 @@ import com.swu.aiZeroCodeHub.model.dto.app.AppMyQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
 import com.swu.aiZeroCodeHub.model.entity.App;
 import com.swu.aiZeroCodeHub.service.ProjectDownloadService;
-import com.swu.aiZeroCodeHub.service.impl.ProjectDownloadServiceImpl;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import com.swu.aiZeroCodeHub.service.AppService;
@@ -197,6 +197,37 @@ public class AppController {
         return ResultUtils.success(url);
     }
 
+    /**
+     * 获取下载链接（带时效）
+     * @param appId 应用ID
+     * @param request 请求
+     * @return 下载链接
+     */
+    @GetMapping("/download/link/{appId}")
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public BaseResponse<String> getDownloadLink(@PathVariable Long appId, HttpServletRequest request) {
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用ID无效");
+
+        App app = appService.getById(appId);
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
+
+        User loginUser = userService.getLoginUser(request);
+        if (!app.getUserId().equals(loginUser.getId())) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限下载该应用代码");
+        }
+
+        String codeGenType = app.getCodeGenType();
+        String sourceDirName = codeGenType + "_" + appId;
+        String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
+        File sourceDir = new File(sourceDirPath);
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!sourceDir.exists() || !sourceDir.isDirectory(),
+                ErrorCode.NOT_FOUND_ERROR, "应用代码不存在，请先生成代码");
+
+        String token = projectDownloadService.createDownloadToken(appId, loginUser.getId());
+        String downloadUrl = String.format("/app/download/%s?token=%s", appId, token);
+        return ResultUtils.success(downloadUrl);
+    }
+
 
 
     /**
@@ -206,6 +237,7 @@ public class AppController {
      * @param response 响应
      */
     @GetMapping("/download/{appId}")
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
     public void downloadAppCode(@PathVariable Long appId,
                                 HttpServletRequest request,
                                 HttpServletResponse response) {
@@ -220,6 +252,11 @@ public class AppController {
         User loginUser = userService.getLoginUser(request);
         if (!app.getUserId().equals(loginUser.getId())) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限下载该应用代码");
+        }
+        String token = request.getParameter("token");
+        if (StrUtil.isNotBlank(token)) {
+            boolean valid = projectDownloadService.validateDownloadToken(token, appId, loginUser.getId());
+            ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!valid, ErrorCode.NO_AUTH_ERROR, "下载链接已失效，请重新获取");
         }
 
         // 4. 构建应用代码目录路径（生成目录，非部署目录）
@@ -236,7 +273,7 @@ public class AppController {
         String downloadFileName = String.valueOf(appId);
 
         // 7. 调用通用下载服务
-        projectDownloadService.downloadProjectAsZip(sourceDirPath, downloadFileName, response);
+        projectDownloadService.downloadProjectAsZip(sourceDirPath, downloadFileName, request, response);
     }
 }
 

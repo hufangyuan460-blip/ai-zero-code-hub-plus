@@ -30,11 +30,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Component
 public class FileWriteTool {
 
-    // 每个应用生成的最大文件数量限制，防止死循环
-    private static final int MAX_FILES_PER_APP = 50;
-    
     // 记录每个应用已写入的文件数量
     private final Map<Long, AtomicInteger> appFileCountMap = new ConcurrentHashMap<>();
+    private final Map<Long, Long> appLastWriteTimeMap = new ConcurrentHashMap<>();
+    private final Map<Long, Boolean> appGenerationCompletedMap = new ConcurrentHashMap<>();
 
     /**
      * 重置指定应用的写入计数（在每次重新生成开始时调用）
@@ -43,44 +42,98 @@ public class FileWriteTool {
     public void resetFileCount(Long appId) {
         if (appId != null) {
             appFileCountMap.remove(appId);
+            appLastWriteTimeMap.remove(appId);
+            appGenerationCompletedMap.remove(appId);
         }
     }
 
-    @Tool("写入文件到指定路径")
-    public String writeFile(@P("文件的相对路径") String relativeFilePath,
-                            @P("要写入文件的内容") String content,
+    public void markGenerationStarted(Long appId) {
+        if (appId != null) {
+            appFileCountMap.remove(appId);
+            appLastWriteTimeMap.remove(appId);
+            appGenerationCompletedMap.put(appId, false);
+        }
+    }
+
+    public void markGenerationCompleted(Long appId) {
+        if (appId != null) {
+            appGenerationCompletedMap.put(appId, true);
+        }
+    }
+
+    public void markGenerationFailed(Long appId) {
+        if (appId != null) {
+            appGenerationCompletedMap.put(appId, false);
+        }
+    }
+
+    public boolean hasGenerationStatus(Long appId) {
+        return appId != null && appGenerationCompletedMap.containsKey(appId);
+    }
+
+    public boolean isGenerationCompleted(Long appId) {
+        return appId != null && Boolean.TRUE.equals(appGenerationCompletedMap.get(appId));
+    }
+
+    public boolean isWriteIdle(Long appId, long idleMs) {
+        if (appId == null) {
+            return true;
+        }
+        Long lastWrite = appLastWriteTimeMap.get(appId);
+        if (lastWrite == null) {
+            return true;
+        }
+        return System.currentTimeMillis() - lastWrite >= idleMs;
+    }
+
+    public int getFileCount(Long appId) {
+        if (appId == null) {
+            return 0;
+        }
+        AtomicInteger count = appFileCountMap.get(appId);
+        return count == null ? 0 : count.get();
+    }
+
+    @Tool("writeFile")
+    public String writeFile(@P("relativeFilePath") String relativeFilePath,
+                            @P("content") String content,
                             @ToolMemoryId Long appId) {
-        // 0. 检查写入次数限制
+        // 0. 记录写入次数
         if (appId != null) {
             AtomicInteger count = appFileCountMap.computeIfAbsent(appId, k -> new AtomicInteger(0));
             // 每次调用前打印日志，避免无限打印
             log.info("AppId: {} 正在写入文件: {} (当前第 {} 个文件)", appId, relativeFilePath, count.get() + 1);
-            
-            if (count.get() >= MAX_FILES_PER_APP) {
-                String msg = String.format("系统限制：单个项目最多允许生成 %d 个文件，已停止写入。请停止调用工具。", MAX_FILES_PER_APP);
-                log.warn("AppId: {} 达到文件写入限制", appId);
-                return msg;
-            }
             count.incrementAndGet();
+            appLastWriteTimeMap.put(appId, System.currentTimeMillis());
         } else {
             // 如果 appId 为空，为了安全起见，打印警告
             log.warn("writeFile called with null appId. Limit check skipped but file will be written to null project dir (risky).");
         }
 
         // 1. 基础校验：必须是相对路径，禁止路径穿越
-        if (relativeFilePath == null || relativeFilePath.isBlank()) {
+        if (relativeFilePath == null) {
             return "文件写入失败：文件路径不能为空";
         }
 
-        Path relativePath = Paths.get(relativeFilePath);
+        // 允许常见前缀并进行规范化：去掉前导空白、./、.\\、/、\\
+        String normalizedPath = relativeFilePath.trim();
+        while (normalizedPath.startsWith("./") || normalizedPath.startsWith(".\\")
+                || normalizedPath.startsWith("/") || normalizedPath.startsWith("\\")) {
+            normalizedPath = normalizedPath.substring(1);
+        }
+        if (normalizedPath.isBlank()) {
+            return "文件写入失败：文件路径不能为空";
+        }
+
+        Path relativePath = Paths.get(normalizedPath);
         if (relativePath.isAbsolute()) {
-            String msg = "文件写入失败：仅允许相对路径，禁止绝对路径 -> " + relativeFilePath;
+            String msg = "文件写入失败：仅允许相对路径，禁止绝对路径 -> " + normalizedPath;
             log.warn(msg);
             return msg;
         }
         // 简单防御：拒绝包含路径穿越标记
-        if (relativeFilePath.contains("..")) {
-            String msg = "文件写入失败：检测到非法路径（禁止包含 ..）-> " + relativeFilePath;
+        if (normalizedPath.contains("..")) {
+            String msg = "文件写入失败：检测到非法路径（禁止包含 ..）-> " + normalizedPath;
             log.warn(msg);
             return msg;
         }
@@ -93,7 +146,7 @@ public class FileWriteTool {
             // 3. 组装最终写入路径，并再次校验不越界
             Path targetPath = projectRoot.resolve(relativePath).normalize();
             if (!targetPath.startsWith(projectRoot)) {
-                String msg = "文件写入失败：目标路径超出允许的项目根目录 -> " + relativeFilePath;
+                String msg = "文件写入失败：目标路径超出允许的项目根目录 -> " + normalizedPath;
                 log.warn(msg);
                 return msg;
             }
@@ -105,13 +158,13 @@ public class FileWriteTool {
             }
 
             // 5. 写入文件（覆盖模式）
-            Files.writeString(targetPath, content, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            Files.writeString(targetPath, content == null ? "" : content, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
-            log.info("AppId: {} 文件写入成功: {}", appId, relativeFilePath);
-            return "文件写入成功：" + relativeFilePath;
+            log.info("AppId: {} 文件写入成功: {}", appId, normalizedPath);
+            return "文件写入成功：" + normalizedPath;
 
         } catch (IOException e) {
-            log.error("文件写入异常: appId={}, path={}, error={}", appId, relativeFilePath, e.getMessage());
+            log.error("文件写入异常: appId={}, path={}, error={}", appId, normalizedPath, e.getMessage());
             return "文件写入发生系统错误：" + e.getMessage();
         }
     }

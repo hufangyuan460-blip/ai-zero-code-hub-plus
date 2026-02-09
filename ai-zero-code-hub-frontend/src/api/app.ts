@@ -161,3 +161,11 @@ export const deployApp = async (data: AppDeployRequest) => {
   const res = await request.post<any>('/app/deploy', data)
   return unwrapBaseResponse<string>(res)
 }
+
+/**
+ * Get Download Link
+ */
+export const getDownloadLink = async (appId: string | number) => {
+  const res = await request.get<any>(`/app/download/link/${appId}`)
+  return unwrapBaseResponse<string>(res)
+}

@@ -2,6 +2,7 @@ package com.swu.aiZeroCodeHub.service.impl;
 
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
+import com.swu.aiZeroCodeHub.constant.AppConstant;
 import com.swu.aiZeroCodeHub.common.utils.WebScreenshotUtils;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
@@ -23,8 +24,9 @@ public class ScreenshotServiceImpl implements ScreenshotService {
     private CosManager cosManager;
 
     @Override
-    public String generateAndUploadScreenshot(String webUrl) {
+    public String generateAndUploadScreenshot(Long appId, String webUrl) {
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(webUrl), ErrorCode.PARAM_ERROR, "网页URL不能为空");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "appId不能为空");
 
         log.info("开始生成网页截图，URL: {}", webUrl);
 
@@ -33,9 +35,13 @@ public class ScreenshotServiceImpl implements ScreenshotService {
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(localScreenshotPath), ErrorCode.OPERATION_ERROR, "本地截图生成失败");
 
         try {
-            // 2. 上传到对象存储
-            String cosUrl = uploadScreenshotToCos(localScreenshotPath);
-            ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(cosUrl), ErrorCode.OPERATION_ERROR, "截图上传对象存储失败");
+            File coverFile = saveCoverToLocalFile(appId, localScreenshotPath);
+            String localUrl = buildCoverUrl(appId);
+            // 2. 上传到对象存储（使用本地落盘文件，确保一致）
+            String cosUrl = uploadScreenshotToCos(coverFile, appId);
+            if (StrUtil.isBlank(cosUrl)) {
+                return localUrl;
+            }
 
             log.info("网页截图生成并上传成功: {} -> {}", webUrl, cosUrl);
             return cosUrl;
@@ -48,32 +54,26 @@ public class ScreenshotServiceImpl implements ScreenshotService {
     /**
      * 上传截图到对象存储
      * @param localScreenshotPath 本地截图路径
+     * @param appId 应用ID（用于统一命名）
      * @return 对象存储访问URL，失败返回null
      */
-    private String uploadScreenshotToCos(String localScreenshotPath) {
-        if (StrUtil.isBlank(localScreenshotPath)) {
+    private String uploadScreenshotToCos(File coverFile, Long appId) {
+        if (coverFile == null) {
             return null;
         }
 
-        File screenshotFile = new File(localScreenshotPath);
-        if (!screenshotFile.exists()) {
-            log.error("截图文件不存在: {}", localScreenshotPath);
+        if (!coverFile.exists()) {
+            log.error("截图文件不存在: {}", coverFile.getAbsolutePath());
             return null;
         }
 
-        // 生成COS对象键
-        String fileName = UUID.randomUUID().toString().substring(0, 8) + "_compressed.jpg";
-        String cosKey = generateScreenshotKey(fileName);
-        return cosManager.uploadFile(cosKey, screenshotFile);
+        String fileName = appId + ".jpg";
+        String cosKey = buildCoverCosKey(fileName);
+        return cosManager.uploadFile(cosKey, coverFile);
     }
 
-    /**
-     * 生成截图的对象存储键
-     * 格式：/screenshots/2025/07/31/filename.jpg
-     */
-    private String generateScreenshotKey(String fileName) {
-        String datePath = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy/MM/dd"));
-        return String.format("/screenshots/%s/%s", datePath, fileName);
+    private String buildCoverCosKey(String fileName) {
+        return String.format("covers/%s", fileName);
     }
 
     /**
@@ -87,5 +87,27 @@ public class ScreenshotServiceImpl implements ScreenshotService {
             FileUtil.del(parentDir);
             log.info("本地截图文件已清理: {}", localFilePath);
         }
+    }
+
+    private File saveCoverToLocalFile(Long appId, String localScreenshotPath) {
+        if (StrUtil.isBlank(localScreenshotPath)) {
+            return null;
+        }
+        File screenshotFile = new File(localScreenshotPath);
+        if (!screenshotFile.exists()) {
+            log.error("截图文件不存在: {}", localScreenshotPath);
+            return null;
+        }
+        String coversDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + "covers";
+        File coversDir = new File(coversDirPath);
+        FileUtil.mkdir(coversDir);
+        String fileName = appId + ".jpg";
+        File targetFile = new File(coversDir, fileName);
+        FileUtil.copy(screenshotFile, targetFile, true);
+        return targetFile;
+    }
+
+    private String buildCoverUrl(Long appId) {
+        return String.format("/api/static/covers/%d.jpg", appId);
     }
 }

@@ -34,6 +34,7 @@ import java.io.File;
 @Slf4j
 public class AiCodeGeneratorFacade {
     @Resource
+    @org.springframework.context.annotation.Lazy
     private com.swu.aiZeroCodeHub.config.AiCodeGeneratorServiceFactory aiCodeGeneratorServiceFactory;
     @Resource
     private CodeParserExecutor codeParserExecutor;
@@ -93,6 +94,22 @@ public class AiCodeGeneratorFacade {
                     }catch (Exception e){
                         log.error("保存失败：{}",e.getMessage());
                     }
+                })
+                .doOnCancel(() -> {
+                    // 如果流被取消（如连接中断），尝试保存已生成的部分代码
+                    try {
+                        String partialHtmlCode = codeBuilder.toString();
+                        if (!partialHtmlCode.isEmpty()) {
+                            log.info("流被取消，尝试保存部分HTML代码，长度：{}", partialHtmlCode.length());
+                            CodeResult codeResult = codeParserExecutor.parse(partialHtmlCode, CodeGenTypeEnum.HTML);
+                            // 注意：解析可能会失败，如果代码不完整。这里仅做最佳尝试。
+                            if (codeResult != null) {
+                                codeFileSaverExecutor.save(codeResult, CodeGenTypeEnum.HTML, appId);
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("保存部分HTML代码失败: {}", e.getMessage());
+                    }
                 });
     }
 
@@ -119,6 +136,21 @@ public class AiCodeGeneratorFacade {
                     }catch (Exception e){
                         log.error("保存失败：{}",e.getMessage());
                     }
+                })
+                .doOnCancel(() -> {
+                    // 如果流被取消，尝试保存已生成的部分代码
+                    try {
+                        String partialCode = codeBuilder.toString();
+                        if (!partialCode.isEmpty()) {
+                            log.info("流被取消，尝试保存部分多文件代码，长度：{}", partialCode.length());
+                            CodeResult codeResult = codeParserExecutor.parse(partialCode, CodeGenTypeEnum.MULTI_FILE);
+                            if (codeResult != null) {
+                                codeFileSaverExecutor.save(codeResult, CodeGenTypeEnum.MULTI_FILE, appId);
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("保存部分多文件代码失败: {}", e.getMessage());
+                    }
                 });
     }
 
@@ -135,11 +167,10 @@ public class AiCodeGeneratorFacade {
         // Vue 工程模式下，代码由 FileWriteTool 直接写入到项目目录，
         // 这里主要负责把推理模型的思考过程 / 计划 / 工具调用说明按流式返回给前端展示。
         
-        // 重置该应用的文件写入计数，防止计数残留导致无法生成
-        fileWriteTool.resetFileCount(appId);
+        fileWriteTool.markGenerationStarted(appId);
         
         TokenStream tokenStream = aiCodeGeneratorService.generateProjectCodeStream(appId, userMessage);
-        Flux<String> fluxResult = processTokenStream(tokenStream);
+        Flux<String> fluxResult = processTokenStream(tokenStream, appId);
         StringBuilder contentBuilder = new StringBuilder();
         return fluxResult
                 .doOnNext(chunk -> {
@@ -150,6 +181,7 @@ public class AiCodeGeneratorFacade {
                     log.info("Vue 项目生成完成，appId: {}, 总输出长度: {}", appId, contentBuilder.length());
                 })
                 .doOnError(e -> {
+                    fileWriteTool.markGenerationFailed(appId);
                     log.error("Vue 项目生成失败，appId: {}, error: {}", appId, e.getMessage(), e);
                 });
     }
@@ -161,7 +193,7 @@ public class AiCodeGeneratorFacade {
      * @param tokenStream TokenStream 对象
      * @return Flux<String> 流式响应
      */
-    private Flux<String> processTokenStream(TokenStream tokenStream) {
+    private Flux<String> processTokenStream(TokenStream tokenStream, Long appId) {
         return Flux.create(sink -> {
             // 限制最大工具调用次数，防止死循环
             java.util.concurrent.atomic.AtomicInteger toolExecutionCount = new java.util.concurrent.atomic.AtomicInteger(0);
@@ -172,16 +204,21 @@ public class AiCodeGeneratorFacade {
                         sink.next(JSONUtil.toJsonStr(aiResponseMessage));
                     })
                     .onPartialToolExecutionRequest((index, toolExecutionRequest) -> {
+                        log.info("捕获工具调用请求: appId={}, index={}, toolName={}, argsLength={}",
+                                appId, index, toolExecutionRequest.name(),
+                                toolExecutionRequest.arguments() == null ? 0 : toolExecutionRequest.arguments().length());
                         ToolRequestMessage toolRequestMessage = new ToolRequestMessage(toolExecutionRequest);
                         sink.next(JSONUtil.toJsonStr(toolRequestMessage));
                     })
                     .onToolExecuted((ToolExecution toolExecution) -> {
                         int count = toolExecutionCount.incrementAndGet();
+                        log.info("工具执行完成: appId={}, count={}, toolName={}",
+                                appId, count, toolExecution.request().name());
                         if (count > MAX_TOOL_EXECUTIONS) {
                             String errorMsg = String.format("\n\n[系统保护] 触发熔断保护：工具调用次数超过限制 (%d次)，强制终止生成。", MAX_TOOL_EXECUTIONS);
                             AiResponseMessage errorResponse = new AiResponseMessage(errorMsg);
                             sink.next(JSONUtil.toJsonStr(errorResponse));
-                            
+                            fileWriteTool.markGenerationFailed(appId);
                             // 显式调用 error 终止流
                             sink.error(new RuntimeException("Tool execution limit exceeded: " + MAX_TOOL_EXECUTIONS));
                             
@@ -196,6 +233,8 @@ public class AiCodeGeneratorFacade {
                             String relativeFilePath = args.getStr("relativeFilePath");
                             String content = args.getStr("content");
                             String suffix = FileUtil.getSuffix(relativeFilePath);
+                            log.info("工具写入文件: appId={}, filePath={}, contentLength={}",
+                                    appId, relativeFilePath, content == null ? 0 : content.length());
                             
                             String displayContent = String.format("\n\n[工具调用] 写入文件 %s\n```%s\n%s\n```\n\n", 
                                 relativeFilePath, suffix, content);
@@ -210,10 +249,19 @@ public class AiCodeGeneratorFacade {
                         }
                     })
                     .onCompleteResponse((ChatResponse response) -> {
+                        log.info("TokenStream 完成: appId={}, fileCount={}", appId, fileWriteTool.getFileCount(appId));
+                        if (fileWriteTool.getFileCount(appId) <= 0) {
+                            fileWriteTool.markGenerationFailed(appId);
+                            sink.next(JSONUtil.toJsonStr(new AiResponseMessage("\n\n[系统错误] 未检测到任何文件写入，请重新生成或检查工具调用。")));
+                            sink.complete();
+                            return;
+                        }
+                        fileWriteTool.markGenerationCompleted(appId);
                         sink.complete();
                     })
                     .onError((Throwable error) -> {
                         log.error("TokenStream error", error);
+                        fileWriteTool.markGenerationFailed(appId);
                         // 发送错误消息给前端，让用户知道发生了错误
                         sink.next(JSONUtil.toJsonStr(new AiResponseMessage("\n\n[系统错误] 生成过程中断: " + error.getMessage())));
                         // 结束流，确保 done 事件能发送（通过 Controller 的 concatWith）

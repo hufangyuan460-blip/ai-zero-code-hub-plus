@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, computed } from 'vue'
+import { ref, onMounted, nextTick, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { getMyAppInfo, deployApp, type AppVO } from '@/api/app'
+import { getMyAppInfo, deployApp, getDownloadLink, type AppVO } from '@/api/app'
 import { listChatHistoryByPage, type ChatHistoryVO } from '@/api/chat'
+import { request } from '@/api/request'
 import { useUserStore } from '@/stores/user'
+import { useVisualEditor } from '@/composables/useVisualEditor'
+import { FormOutlined, SendOutlined } from '@ant-design/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const { isEditMode, selectedElement, toggleEditMode, clearSelection, exitEditMode, initVisualEditor } = useVisualEditor()
 
 const appId = route.params.appId as string
 const app = ref<AppVO>()
@@ -22,6 +26,22 @@ const codeGenTypeMap: Record<string, string> = {
   vue_project: 'Vue 工程项目(复杂项目)'
 }
 const previewLoading = ref(false)
+// const coverStatus = ref<'idle' | 'loading' | 'loaded' | 'error'>('idle')
+// const coverUrl = computed(() => app.value?.cover || '')
+// const fallbackCover = `data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360"><rect width="640" height="360" fill="%23f5f5f5"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="%23999" font-size="20">暂无封面</text></svg>')}`
+// const coverDisplayUrl = computed(() => {
+//   // 如果正在生成中且没有封面，显示"应用生成中"
+//   const isGenerating = messages.value.some(m => m.loading)
+//   if (!coverUrl.value && isGenerating) {
+//     // 使用一个简单的SVG作为生成中占位图
+//     return `data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360"><rect width="640" height="360" fill="#f0f2f5"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#1890ff" font-size="24" font-family="sans-serif">应用生成中...</text><circle cx="320" cy="240" r="20" stroke="#1890ff" stroke-width="3" fill="none"><animate attributeName="stroke-dasharray" from="0 150" to="150 150" dur="2s" repeatCount="indefinite"/><animate attributeName="stroke-dashoffset" from="0" to="-150" dur="2s" repeatCount="indefinite"/></circle></svg>')}`
+//   }
+  
+//   if (!coverUrl.value || coverStatus.value === 'error') {
+//     return fallbackCover
+//   }
+//   return coverUrl.value
+// })
 
 // Chat
 interface Message {
@@ -42,14 +62,27 @@ const historyLoading = ref(false)
 const previewUrl = computed(() => {
   if (deployedUrl.value) return deployedUrl.value
   if (!app.value) return ''
-  return `http://localhost:8123/api/static/${codeGenType.value || 'website'}_${app.value.id}/index.html?t=${new Date().getTime()}`
+  // Use relative path for local preview to support Same-Origin (via proxy)
+  return `/api/static/${codeGenType.value || 'website'}_${app.value.id}/index.html?t=${new Date().getTime()}`
 })
 const iframeRef = ref<HTMLIFrameElement>()
+const downloading = ref(false)
+const downloadStatus = ref<'idle' | 'preparing' | 'downloading' | 'success' | 'error'>('idle')
+const downloadProgress = ref(0)
+const downloadText = computed(() => {
+  if (downloadStatus.value === 'preparing') return '准备中'
+  if (downloadStatus.value === 'downloading') return '下载中'
+  if (downloadStatus.value === 'success') return '已完成'
+  if (downloadStatus.value === 'error') return '重试下载'
+  return '下载源码'
+})
 
 // Fetch App Info
-const loadAppInfo = async () => {
+const loadAppInfo = async (silent = false) => {
   if (!appId) return
-  loading.value = true
+  if (!silent) {
+    loading.value = true
+  }
   try {
     const res = await getMyAppInfo(appId)
     if (res) {
@@ -57,8 +90,10 @@ const loadAppInfo = async () => {
       if (res.codeGenType) {
         codeGenType.value = res.codeGenType
       }
-      if (res.deployKey) {
-        deployedUrl.value = `http://localhost:8123/app/${res.deployKey}/`
+      if (res.deployKey && res.deployedTime) {
+        deployedUrl.value = `/api/app/${res.deployKey}/index.html`
+      } else {
+        deployedUrl.value = ''
       }
     } else {
       message.error('应用不存在')
@@ -66,7 +101,9 @@ const loadAppInfo = async () => {
   } catch {
     message.error('加载应用失败')
   } finally {
-    loading.value = false
+    if (!silent) {
+      loading.value = false
+    }
   }
 }
 
@@ -121,11 +158,14 @@ const loadHistory = async (isLoadMore = false) => {
 }
 
 // 自动部署超时计时器
-let deployTimeoutTimer: number | null = null;
+let deployTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
 const resetDeployTimeout = () => {
   if (deployTimeoutTimer) {
     clearTimeout(deployTimeoutTimer);
+  }
+  if (codeGenType.value === 'vue_project') {
+    return
   }
   // 如果 60 秒没有收到新消息，强制结束并部署
   deployTimeoutTimer = setTimeout(() => {
@@ -142,7 +182,7 @@ const forceDeploy = async () => {
     messages.value[aiMsgIndexRef.value]!.loading = false;
   }
 
-  if (app.value) {
+  if (app.value && codeGenType.value === 'vue_project') {
       try {
         deploying.value = true
         message.loading({ content: '生成完毕（或长时间未响应），正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...', key: 'auto_deploy', duration: 0 })
@@ -159,13 +199,15 @@ const forceDeploy = async () => {
         loadHistory(false)
       }
     } else {
+      deployedUrl.value = ''
+      refreshPreview()
       loadHistory(false)
     }
 };
 
 // SSE Generation
-let eventSourceRef = ref<EventSource | null>(null);
-let aiMsgIndexRef = ref<number>(0);
+const eventSourceRef = ref<EventSource | null>(null);
+const aiMsgIndexRef = ref<number>(0);
 
 const onGenerate = async (prompt: string) => {
   if (!app.value || !prompt) return
@@ -239,8 +281,7 @@ const onGenerate = async (prompt: string) => {
     messages.value[aiMsgIndex]!.loading = false
     eventSource.close()
 
-    // 自动部署逻辑
-    if (app.value) {
+    if (app.value && codeGenType.value === 'vue_project') {
       try {
         deploying.value = true
         message.loading({ content: '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...', key: 'auto_deploy', duration: 0 })
@@ -257,6 +298,8 @@ const onGenerate = async (prompt: string) => {
         loadHistory(false)
       }
     } else {
+      deployedUrl.value = ''
+      refreshPreview()
       loadHistory(false)
     }
   })
@@ -274,11 +317,8 @@ const onGenerate = async (prompt: string) => {
     // 出错也尝试刷新历史记录，捕获后端已保存的错误信息
     loadHistory(false)
 
-    // 如果出错时已经生成了部分内容，尝试部署
-    if (app.value && messages.value[aiMsgIndex]!.content.length > 100) {
-        // 只有内容足够长才尝试自动部署
-        forceDeploy();
-    }
+    // 连接中断时不强制部署，避免部署不完整的代码
+    // 只有在超时的情况下（上面的 setTimeout）才尝试强制部署
   }
 }
 
@@ -298,25 +338,81 @@ const scrollToBottom = () => {
   })
 }
 
-const handleDeploy = async () => {
-  if (!app.value) return
-  deploying.value = true
+
+const parseFileName = (disposition?: string) => {
+  if (!disposition) return ''
+  const match = disposition.match(/filename\*?=(?:UTF-8''|utf-8'')?([^;]+)/i)
+  if (!match?.[1]) return ''
+  const fileName = match[1].trim().replace(/(^"|"$)/g, '')
   try {
-    const deployUrl = await deployApp({ appId: app.value.id })
-    if (deployUrl) {
-      message.success('部署成功')
-      window.open(deployUrl, '_blank')
-    }
+    return decodeURIComponent(fileName)
   } catch {
-    message.error('部署失败')
+    return fileName
+  }
+}
+
+const saveBlob = (blob: Blob, fileName: string) => {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+const handleDownload = async () => {
+  if (!app.value) return
+  downloading.value = true
+  downloadStatus.value = 'preparing'
+  downloadProgress.value = 0
+  try {
+    const link = await getDownloadLink(app.value.id)
+    downloadStatus.value = 'downloading'
+    const res = await request.get(link, {
+      responseType: 'blob',
+      transformResponse: data => data,
+      onDownloadProgress: (event) => {
+        if (event.total) {
+          downloadProgress.value = Math.round((event.loaded / event.total) * 100)
+        }
+      }
+    })
+    const blob = res.data instanceof Blob ? res.data : new Blob([res.data])
+    if (!blob.size) {
+      throw new Error('下载内容为空')
+    }
+    const fileName = parseFileName(res.headers['content-disposition']) || `${app.value.id}.zip`
+    saveBlob(blob, fileName)
+    downloadStatus.value = 'success'
+    message.success('下载完成')
+  } catch (e) {
+    downloadStatus.value = 'error'
+    message.error((e as Error)?.message || '下载失败')
   } finally {
-    deploying.value = false
+    downloading.value = false
+    if (downloadStatus.value === 'success') {
+      setTimeout(() => {
+        downloadStatus.value = 'idle'
+        downloadProgress.value = 0
+      }, 1500)
+    }
   }
 }
 
 const onSendMessage = () => {
-    if (inputPrompt.value.trim()) {
-        onGenerate(inputPrompt.value)
+    let prompt = inputPrompt.value.trim();
+    if (selectedElement.value) {
+        const elInfo = `\n\n【用户选中的元素信息】\n标签: ${selectedElement.value.tagName}\nXPath: ${selectedElement.value.xpath}\n文本内容: ${selectedElement.value.text}\nHTML片段: ${selectedElement.value.html}\n`;
+        prompt += elInfo;
+        
+        // Clear selection and exit edit mode
+        exitEditMode(iframeRef.value);
+    }
+
+    if (prompt) {
+        onGenerate(prompt)
     }
 }
 
@@ -341,6 +437,32 @@ onMounted(async () => {
     onGenerate(initPrompt)
   }
 })
+
+// watch(coverUrl, (value) => {
+//   if (value) {
+//     coverStatus.value = 'loading'
+//   } else {
+//     coverStatus.value = 'idle'
+//   }
+// }, { immediate: true })
+
+// const onCoverLoad = () => {
+//   coverStatus.value = 'loaded'
+// }
+
+// const onCoverError = () => {
+//   coverStatus.value = 'error'
+// }
+
+const onIframeLoad = () => {
+  if (isEditMode.value && iframeRef.value) {
+    initVisualEditor(iframeRef.value)
+    // Re-enable edit mode in the new iframe document
+    setTimeout(() => {
+      iframeRef.value?.contentWindow?.postMessage({ type: 'VE_START' }, '*')
+    }, 100)
+  }
+}
 </script>
 
 <template>
@@ -357,7 +479,11 @@ onMounted(async () => {
         <a-tag color="blue" style="font-size: 14px; padding: 4px 10px;">{{ codeGenTypeMap[codeGenType] || codeGenType }}</a-tag>
       </div>
       <div class="right">
-        <a-button type="primary" :loading="deploying" @click="handleDeploy">部署</a-button>
+        <div class="download-wrap">
+          <a-button :loading="downloading" @click="handleDownload">{{ downloadText }}</a-button>
+          <a-progress v-if="downloadStatus === 'downloading' && downloadProgress > 0" :percent="downloadProgress" size="small" :show-info="false" />
+          <span v-else-if="downloadStatus === 'error'" class="download-error">下载失败</span>
+        </div>
       </div>
     </header>
 
@@ -385,15 +511,33 @@ onMounted(async () => {
           </div>
         </div>
         <div class="input-area">
-          <a-textarea
-            v-model:value="inputPrompt"
-            placeholder="描述越详细，页面越具体，可以一步一步完善生成效果..."
-            :auto-size="{ minRows: 2, maxRows: 6 }"
-            @pressEnter.prevent="onSendMessage"
-          />
-          <a-button type="primary" shape="circle" @click="onSendMessage" style="margin-left: 8px">
-             ↑
-          </a-button>
+          <div v-if="selectedElement" style="margin-bottom: 10px; width: 100%;">
+              <a-alert type="info" show-icon closable @close="clearSelection(iframeRef)">
+                  <template #message>
+                      <span style="font-weight: bold;">已选中元素:</span> &lt;{{ selectedElement.tagName }}&gt; {{ selectedElement.text.length > 50 ? selectedElement.text.substring(0, 50) + '...' : selectedElement.text }}
+                  </template>
+              </a-alert>
+          </div>
+          <div class="input-controls">
+            <a-button 
+                :type="isEditMode ? 'primary' : 'default'" 
+                :danger="isEditMode"
+                @click="toggleEditMode(iframeRef)" 
+                style="margin-right: 8px"
+                :title="isEditMode ? '退出编辑模式' : '进入可视化编辑模式'"
+            >
+                <template #icon><FormOutlined /></template>
+            </a-button>
+            <a-textarea
+                v-model:value="inputPrompt"
+                placeholder="描述越详细，页面越具体，可以一步一步完善生成效果..."
+                :auto-size="{ minRows: 2, maxRows: 6 }"
+                @pressEnter.prevent="onSendMessage"
+            />
+            <a-button type="primary" shape="circle" @click="onSendMessage" style="margin-left: 8px">
+                <template #icon><SendOutlined /></template>
+            </a-button>
+          </div>
         </div>
       </div>
 
@@ -420,6 +564,7 @@ onMounted(async () => {
                 :src="previewUrl"
                 title="App Preview"
                 style="width: 100%; height: 100%; border: none;"
+                @load="onIframeLoad"
             ></iframe>
             <div v-else-if="!messages.some(m => m.loading)" class="empty-preview">
                 {{ app ? '暂无预览' : '请先生成应用' }}
@@ -449,6 +594,21 @@ onMounted(async () => {
     display: flex;
     align-items: center;
     gap: 12px;
+}
+.right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+.download-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+}
+.download-error {
+    color: #ff4d4f;
+    font-size: 12px;
 }
 .app-name {
     font-size: 18px;
@@ -514,13 +674,59 @@ onMounted(async () => {
   border-top: 1px solid #f0f0f0;
   background: #fff;
   display: flex;
+  flex-direction: column;
+}
+.input-controls {
+  display: flex;
   align-items: flex-end;
+  width: 100%;
 }
 .preview-area {
   flex: 1;
   display: flex;
   flex-direction: column;
   background: #fff;
+}
+.cover-section {
+  padding: 16px 20px 8px 20px;
+}
+.cover-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #333;
+  margin-bottom: 10px;
+}
+.cover-status {
+  font-size: 12px;
+  color: #999;
+}
+.cover-status.error {
+  color: #ff4d4f;
+}
+.cover-body {
+  position: relative;
+  width: 100%;
+  padding-top: 56.25%;
+  background: #fafafa;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.cover-image {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.cover-spin {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1;
 }
 .preview-header {
     height: 40px;

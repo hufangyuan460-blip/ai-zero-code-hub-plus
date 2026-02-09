@@ -48,6 +48,7 @@ langchain4j:
       log-requests: true
 #      合理设置token参数，防止JSON字符串被中途截断
       max-tokens: 8192
+      timeout-seconds: 180
       strict-json-schema: true
       response-format: json_object
 #    流式输出
