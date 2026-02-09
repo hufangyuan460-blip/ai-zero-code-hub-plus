@@ -2,7 +2,7 @@
 import { ref, onMounted, nextTick, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { getMyAppInfo, deployApp, getDownloadLink, captureAndUploadScreenshot, type AppVO } from '@/api/app'
+import { getMyAppInfo, deployApp, getDownloadLink, type AppVO } from '@/api/app'
 import { listChatHistoryByPage, type ChatHistoryVO } from '@/api/chat'
 import { request } from '@/api/request'
 import { useUserStore } from '@/stores/user'
@@ -19,7 +19,7 @@ const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
 const deployedUrl = ref<string>('')
-const codeGenType = ref('html')
+const codeGenType = ref('vue_project')
 const codeGenTypeMap: Record<string, string> = {
   html: '原生 HTML',
   multi_file: '原生多文件',
@@ -36,7 +36,7 @@ const previewLoading = ref(false)
 //     // 使用一个简单的SVG作为生成中占位图
 //     return `data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360"><rect width="640" height="360" fill="#f0f2f5"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#1890ff" font-size="24" font-family="sans-serif">应用生成中...</text><circle cx="320" cy="240" r="20" stroke="#1890ff" stroke-width="3" fill="none"><animate attributeName="stroke-dasharray" from="0 150" to="150 150" dur="2s" repeatCount="indefinite"/><animate attributeName="stroke-dashoffset" from="0" to="-150" dur="2s" repeatCount="indefinite"/></circle></svg>')}`
 //   }
-  
+
 //   if (!coverUrl.value || coverStatus.value === 'error') {
 //     return fallbackCover
 //   }
@@ -69,9 +69,6 @@ const iframeRef = ref<HTMLIFrameElement>()
 const downloading = ref(false)
 const downloadStatus = ref<'idle' | 'preparing' | 'downloading' | 'success' | 'error'>('idle')
 const downloadProgress = ref(0)
-const previewReady = ref(false)
-const coverUpdating = ref(false)
-const deployingManual = ref(false)
 const downloadText = computed(() => {
   if (downloadStatus.value === 'preparing') return '准备中'
   if (downloadStatus.value === 'downloading') return '下载中'
@@ -79,8 +76,6 @@ const downloadText = computed(() => {
   if (downloadStatus.value === 'error') return '重试下载'
   return '下载源码'
 })
-const downloadDisabled = computed(() => !deployedUrl.value || !previewReady.value || deploying.value || downloading.value)
-const manualDeployDisabled = computed(() => deploying.value || deployingManual.value || loading.value)
 
 // Fetch App Info
 const loadAppInfo = async (silent = false) => {
@@ -92,13 +87,13 @@ const loadAppInfo = async (silent = false) => {
     const res = await getMyAppInfo(appId)
     if (res) {
       app.value = res
-      codeGenType.value = res.codeGenType || 'html'
+      // 强制使用 Vue 工程项目类型，确保触发工具调用与部署链路
+      codeGenType.value = 'vue_project'
       if (res.deployKey && res.deployedTime) {
         deployedUrl.value = `/api/app/${res.deployKey}/index.html`
       } else {
         deployedUrl.value = ''
       }
-      previewReady.value = false
     } else {
       message.error('应用不存在')
     }
@@ -194,9 +189,8 @@ const forceDeploy = async () => {
         if (url) {
           deployedUrl.value = url
           message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
-          await handleDeploymentComplete(url)
         }
-      } catch {
+      } catch (e) {
         message.error({ content: '自动部署失败', key: 'auto_deploy' })
       } finally {
         deploying.value = false
@@ -206,9 +200,6 @@ const forceDeploy = async () => {
     } else {
       deployedUrl.value = ''
       refreshPreview()
-      if (!app.value?.cover) {
-        await handleDeploymentComplete(previewUrl.value)
-      }
       loadHistory(false)
     }
 };
@@ -306,9 +297,8 @@ const onGenerate = async (prompt: string) => {
         if (url) {
           deployedUrl.value = url
           message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
-          await handleDeploymentComplete(url)
         }
-      } catch {
+      } catch (e) {
         message.error({ content: '自动部署失败', key: 'auto_deploy' })
       } finally {
         deploying.value = false
@@ -318,9 +308,6 @@ const onGenerate = async (prompt: string) => {
     } else {
       deployedUrl.value = ''
       refreshPreview()
-      if (!app.value?.cover) {
-        await handleDeploymentComplete(previewUrl.value)
-      }
       loadHistory(false)
     }
   })
@@ -384,10 +371,6 @@ const saveBlob = (blob: Blob, fileName: string) => {
 }
 
 const handleDownload = async () => {
-  if (downloadDisabled.value) {
-    message.warning('部署完成并预览可用后才能下载')
-    return
-  }
   if (!app.value) return
   downloading.value = true
   downloadStatus.value = 'preparing'
@@ -426,45 +409,12 @@ const handleDownload = async () => {
   }
 }
 
-const handleManualDeploy = async () => {
-  if (!app.value) return
-  deployingManual.value = true
-  try {
-    message.loading({ content: '正在部署...', key: 'manual_deploy', duration: 0 })
-    const url = await deployApp({ appId: app.value.id })
-    if (url) {
-      deployedUrl.value = url
-      message.success({ content: '部署成功，已更新预览', key: 'manual_deploy' })
-      await handleDeploymentComplete(url)
-    }
-  } catch {
-     message.error({ content: '部署失败', key: 'manual_deploy' })
-   } finally {
-    deployingManual.value = false
-  }
-}
-
-const handleDeploymentComplete = async (url: string) => {
-  if (!app.value || !url || coverUpdating.value) return
-  try {
-    coverUpdating.value = true
-    const coverUrl = await captureAndUploadScreenshot(app.value.id, url)
-    if (coverUrl) {
-      app.value.cover = coverUrl
-    }
-  } catch {
-    message.warning('封面更新失败')
-  } finally {
-    coverUpdating.value = false
-  }
-}
-
 const onSendMessage = () => {
     let prompt = inputPrompt.value.trim();
     if (selectedElement.value) {
         const elInfo = `\n\n【用户选中的元素信息】\n标签: ${selectedElement.value.tagName}\nXPath: ${selectedElement.value.xpath}\n文本内容: ${selectedElement.value.text}\nHTML片段: ${selectedElement.value.html}\n`;
         prompt += elInfo;
-        
+
         // Clear selection and exit edit mode
         exitEditMode(iframeRef.value);
     }
@@ -513,7 +463,6 @@ onMounted(async () => {
 // }
 
 const onIframeLoad = () => {
-  previewReady.value = !!deployedUrl.value
   if (isEditMode.value && iframeRef.value) {
     initVisualEditor(iframeRef.value)
     // Re-enable edit mode in the new iframe document
@@ -522,10 +471,6 @@ const onIframeLoad = () => {
     }, 100)
   }
 }
-
-watch(deployedUrl, () => {
-  previewReady.value = false
-})
 </script>
 
 <template>
@@ -543,8 +488,7 @@ watch(deployedUrl, () => {
       </div>
       <div class="right">
         <div class="download-wrap">
-          <a-button :loading="deployingManual" :disabled="manualDeployDisabled" @click="handleManualDeploy">手动部署</a-button>
-          <a-button :loading="downloading" :disabled="downloadDisabled" @click="handleDownload">{{ downloadText }}</a-button>
+          <a-button :loading="downloading" @click="handleDownload">{{ downloadText }}</a-button>
           <a-progress v-if="downloadStatus === 'downloading' && downloadProgress > 0" :percent="downloadProgress" size="small" :show-info="false" />
           <span v-else-if="downloadStatus === 'error'" class="download-error">下载失败</span>
         </div>
@@ -583,21 +527,21 @@ watch(deployedUrl, () => {
               </a-alert>
           </div>
           <div class="input-controls">
+            <a-button
+                :type="isEditMode ? 'primary' : 'default'"
+                :danger="isEditMode"
+                @click="toggleEditMode(iframeRef)"
+                style="margin-right: 8px"
+                :title="isEditMode ? '退出编辑模式' : '进入可视化编辑模式'"
+            >
+                <template #icon><FormOutlined /></template>
+            </a-button>
             <a-textarea
                 v-model:value="inputPrompt"
                 placeholder="描述越详细，页面越具体，可以一步一步完善生成效果..."
                 :auto-size="{ minRows: 2, maxRows: 6 }"
                 @pressEnter.prevent="onSendMessage"
             />
-            <a-button 
-                :type="isEditMode ? 'primary' : 'default'" 
-                :danger="isEditMode"
-                @click="toggleEditMode(iframeRef)" 
-                style="margin-left: 8px; margin-right: 0"
-                :title="isEditMode ? '退出编辑模式' : '进入可视化编辑模式'"
-            >
-                <template #icon><FormOutlined /></template>
-            </a-button>
             <a-button type="primary" shape="circle" @click="onSendMessage" style="margin-left: 8px">
                 <template #icon><SendOutlined /></template>
             </a-button>
@@ -666,9 +610,9 @@ watch(deployedUrl, () => {
 }
 .download-wrap {
     display: flex;
-    flex-direction: row;
-    gap: 12px;
-    align-items: center;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
 }
 .download-error {
     color: #ff4d4f;
