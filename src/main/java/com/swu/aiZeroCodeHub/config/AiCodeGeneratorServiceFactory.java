@@ -3,7 +3,9 @@ package com.swu.aiZeroCodeHub.config;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.swu.aiZeroCodeHub.aiService.AiCodeGeneratorService;
-import com.swu.aiZeroCodeHub.aiTool.FileWriteTool;
+import com.swu.aiZeroCodeHub.aiService.AiVueCreateService;
+import com.swu.aiZeroCodeHub.aiService.AiVueModifyService;
+import com.swu.aiZeroCodeHub.manager.ToolManager;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
@@ -37,7 +39,7 @@ public class AiCodeGeneratorServiceFactory {
     @Resource
     private StreamingChatModel reasoningStreamingChatModel;
     @Resource
-    private FileWriteTool fileWriteTool;
+    private ToolManager toolManager;
 
 
     /**
@@ -65,7 +67,7 @@ public class AiCodeGeneratorServiceFactory {
                     AiServices.builder(AiCodeGeneratorService.class)
                             .streamingChatModel(reasoningStreamingChatModel)
                             .chatMemoryProvider(memoryId -> chatMemory)
-                            .tools(fileWriteTool)
+                            .tools(toolManager.getAllTools())
                             //幻觉工具名称策略
                             .hallucinatedToolNameStrategy(toolExecutionRequest ->
                                     ToolExecutionResultMessage.from(toolExecutionRequest,
@@ -98,10 +100,7 @@ public class AiCodeGeneratorServiceFactory {
         return createAiCodeGeneratorService(0L, CodeGenTypeEnum.HTML);
     }
 
-    /**
-     * ai服务实例缓存
-     */
-    private final Cache<String, AiCodeGeneratorService> serviceCache = Caffeine.newBuilder()
+    private final Cache<String, Object> serviceCache = Caffeine.newBuilder()
             .maximumSize(1000)
             .expireAfterWrite(Duration.ofMinutes(30))
             .expireAfterAccess(Duration.ofMinutes(10))
@@ -114,9 +113,59 @@ public class AiCodeGeneratorServiceFactory {
     /**
      * 根据appId和代码生成类型获取服务（带缓存）
      */
-    public AiCodeGeneratorService getAiCodeGeneratorService(long appId, CodeGenTypeEnum codeGenType) {
+    public Object getAiCodeGeneratorService(long appId, CodeGenTypeEnum codeGenType) {
         String cacheKey = buildCacheKey(appId, codeGenType);
         return serviceCache.get(cacheKey, key -> createAiCodeGeneratorService(appId, codeGenType));
+    }
+
+    /**
+     * 获取 Vue 创建服务（只包含写入工具）
+     */
+    public AiVueCreateService getVueCreateService(long appId) {
+        String cacheKey = "VUE_CREATE_" + appId;
+        return (AiVueCreateService) serviceCache.get(cacheKey, key -> {
+             MessageWindowChatMemory chatMemory = MessageWindowChatMemory.builder()
+                .id(appId)
+                .chatMemoryStore(redisChatMemoryStore)
+                .maxMessages(1000)
+                .build();
+            chatHistoryService.loadChatHistoryToMemory(appId, chatMemory, 20);
+            
+            return AiServices.builder(AiVueCreateService.class)
+                    .streamingChatModel(reasoningStreamingChatModel)
+                    .chatMemoryProvider(memoryId -> chatMemory)
+                    // 创建模式只允许 writeFile
+                    .tools(toolManager.getToolByName("FileWriteTool")) 
+                    .hallucinatedToolNameStrategy(toolExecutionRequest ->
+                            ToolExecutionResultMessage.from(toolExecutionRequest,
+                                    "Error: there is no tool called " + toolExecutionRequest.name()))
+                    .build();
+        });
+    }
+
+    /**
+     * 获取 Vue 修改服务（包含所有工具）
+     */
+    public AiVueModifyService getVueModifyService(long appId) {
+        String cacheKey = "VUE_MODIFY_" + appId;
+        return (AiVueModifyService) serviceCache.get(cacheKey, key -> {
+             MessageWindowChatMemory chatMemory = MessageWindowChatMemory.builder()
+                .id(appId)
+                .chatMemoryStore(redisChatMemoryStore)
+                .maxMessages(1000)
+                .build();
+            chatHistoryService.loadChatHistoryToMemory(appId, chatMemory, 20);
+
+            return AiServices.builder(AiVueModifyService.class)
+                    .streamingChatModel(reasoningStreamingChatModel)
+                    .chatMemoryProvider(memoryId -> chatMemory)
+                    // 修改模式允许所有工具
+                    .tools(toolManager.getAllTools())
+                    .hallucinatedToolNameStrategy(toolExecutionRequest ->
+                            ToolExecutionResultMessage.from(toolExecutionRequest,
+                                    "Error: there is no tool called " + toolExecutionRequest.name()))
+                    .build();
+        });
     }
 
     /**

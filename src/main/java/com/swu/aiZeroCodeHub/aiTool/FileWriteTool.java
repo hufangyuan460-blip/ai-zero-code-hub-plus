@@ -25,7 +25,7 @@ import java.nio.file.StandardOpenOption;
  */
 @Slf4j
 @Component
-public class FileWriteTool {
+public class FileWriteTool implements AiTool {
 
     @Tool("写入文件到指定路径")
     public String writeFile(@P("文件的相对路径") String relativeFilePath,

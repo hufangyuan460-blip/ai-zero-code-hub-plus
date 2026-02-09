@@ -33,12 +33,9 @@ public class ScreenshotServiceImpl implements ScreenshotService {
 
         try {
             File coverFile = saveCoverToLocalFile(appId, localScreenshotPath);
-            String localUrl = buildCoverUrl(appId);
             // 2. 上传到对象存储（使用本地落盘文件，确保一致）
             String cosUrl = uploadScreenshotToCos(coverFile, appId);
-            if (StrUtil.isBlank(cosUrl)) {
-                return localUrl;
-            }
+            ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(cosUrl), ErrorCode.OPERATION_ERROR, "COS上传失败");
 
             log.info("网页截图生成并上传成功: {} -> {}", webUrl, cosUrl);
             return cosUrl;
@@ -104,7 +101,4 @@ public class ScreenshotServiceImpl implements ScreenshotService {
         return targetFile;
     }
 
-    private String buildCoverUrl(Long appId) {
-        return String.format("/api/static/covers/%d.jpg", appId);
-    }
 }

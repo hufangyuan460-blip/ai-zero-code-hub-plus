@@ -14,11 +14,15 @@ import com.swu.aiZeroCodeHub.model.message.StreamMessage;
 import com.swu.aiZeroCodeHub.model.message.ToolExecutedMessage;
 import com.swu.aiZeroCodeHub.model.message.ToolRequestMessage;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
+import com.swu.aiZeroCodeHub.manager.ToolManager;
+import com.swu.aiZeroCodeHub.aiTool.AiTool;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+import dev.langchain4j.agent.tool.Tool;
 
+import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -33,6 +37,8 @@ import java.util.Set;
 public class JsonMessageStreamHandler {
     @Resource
     private SSEParser sseParser;
+    @Resource
+    private ToolManager toolManager;
 
     /**
      * 处理 TokenStream （VUE_PROJECT）
@@ -100,11 +106,33 @@ public class JsonMessageStreamHandler {
             case TOOL_REQUEST -> {
                 ToolRequestMessage toolRequestMessage = JSONUtil.toBean(chunk, ToolRequestMessage.class);
                 String toolId = toolRequestMessage.getId();
+                String toolName = toolRequestMessage.getName();
+                
                 // 检查是否是第一次看到这个工具 ID
                 if (toolId != null && !seenToolIds.contains(toolId)) {
                     // 第一次调用这个工具，记录 ID 并完整返回工具信息
                     seenToolIds.add(toolId);
-                    return "\n\n[选择工具] 写入文件\n\n";
+                    
+                    // 获取工具描述
+                    String toolDescription = "调用工具";
+                    if (toolName != null) {
+                        AiTool tool = toolManager.getToolByName(toolName);
+                        if (tool != null) {
+                            // 尝试从注解获取描述
+                            for (Method method : tool.getClass().getMethods()) {
+                                if (method.isAnnotationPresent(Tool.class)) {
+                                    Tool toolAnnotation = method.getAnnotation(Tool.class);
+                                    String[] value = toolAnnotation.value();
+                                    if (value.length > 0 && StrUtil.isNotBlank(value[0])) {
+                                        toolDescription = value[0];
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    return String.format("\n\n[选择工具] %s\n\n", toolDescription);
                 } else {
                     // 不是第一次调用这个工具，直接返回空
                     return "";
@@ -113,16 +141,45 @@ public class JsonMessageStreamHandler {
             case TOOL_EXECUTED -> {
                 ToolExecutedMessage toolExecutedMessage = JSONUtil.toBean(chunk, ToolExecutedMessage.class);
                 JSONObject jsonObject = JSONUtil.parseObj(toolExecutedMessage.getArguments());
-                String relativeFilePath = jsonObject.getStr("relativeFilePath");
-                String suffix = FileUtil.getSuffix(relativeFilePath);
-                String content = jsonObject.getStr("content");
-
-                String result = String.format("""
-                        [工具调用] 写入文件 %s
+                
+                // 尝试解析不同工具的参数
+                String toolName = toolExecutedMessage.getName();
+                String content = "";
+                String path = "";
+                String suffix = "";
+                
+                if (jsonObject.containsKey("relativeFilePath")) {
+                    path = jsonObject.getStr("relativeFilePath");
+                    suffix = FileUtil.getSuffix(path);
+                } else if (jsonObject.containsKey("relativeDirPath")) {
+                    path = jsonObject.getStr("relativeDirPath");
+                }
+                
+                if (jsonObject.containsKey("content")) {
+                    content = jsonObject.getStr("content");
+                } else if (jsonObject.containsKey("oldContent") && jsonObject.containsKey("newContent")) {
+                    // 修改文件工具
+                    content = "Old:\n" + jsonObject.getStr("oldContent") + "\n\nNew:\n" + jsonObject.getStr("newContent");
+                }
+                
+                String result = "";
+                if ("writeFile".equals(toolName) || "modifyFile".equals(toolName)) {
+                     result = String.format("""
+                        [工具调用] %s %s
                         ```%s
                         %s
                         ```
-                        """, relativeFilePath, suffix, content);
+                        """, toolName, path, suffix, content);
+                } else if ("readFile".equals(toolName)) {
+                     result = String.format("[工具调用] 读取文件 %s", path);
+                } else if ("deleteFile".equals(toolName)) {
+                     result = String.format("[工具调用] 删除文件 %s", path);
+                } else if ("getProjectFileTree".equals(toolName)) {
+                     result = String.format("[工具调用] 获取目录结构 %s", path);
+                } else {
+                     // 默认展示
+                     result = String.format("[工具调用] %s %s", toolName, jsonObject.toString());
+                }
 
                 // 输出前端和要持久化的内容
                 String output = String.format("\n\n%s\n\n", result);

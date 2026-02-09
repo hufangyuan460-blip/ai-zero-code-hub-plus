@@ -2,6 +2,9 @@ package com.swu.aiZeroCodeHub.core;
 
 import cn.hutool.json.JSONUtil;
 import com.swu.aiZeroCodeHub.aiService.AiCodeGeneratorService;
+import com.swu.aiZeroCodeHub.aiService.AiVueCreateService;
+import com.swu.aiZeroCodeHub.aiService.AiVueModifyService;
+import com.swu.aiZeroCodeHub.constant.AppConstant;
 import com.swu.aiZeroCodeHub.core.executor.CodeFileSaverExecutor;
 import com.swu.aiZeroCodeHub.core.executor.CodeParserExecutor;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
@@ -22,6 +25,9 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
 import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
 /**
  * AI 代码生成统一入口（Facade）。
@@ -47,17 +53,18 @@ public class AiCodeGeneratorFacade {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "生成类型为空");
         }
         long realAppId = appId == null ? 0L : appId;
-        // 根据生成类型选择对应的 AI 服务实例（不同类型可使用不同模型 / 工具配置）
-        AiCodeGeneratorService aiCodeGeneratorService =
-                aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(realAppId, codeGenTypeEnum);
 
         // Use if-else instead of switch expression to avoid anonymous inner class issues in some environments
         if (codeGenTypeEnum == CodeGenTypeEnum.HTML) {
+            AiCodeGeneratorService aiCodeGeneratorService = (AiCodeGeneratorService)
+                    aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(realAppId, codeGenTypeEnum);
             return generateAndSaveHtmlCodeStream(aiCodeGeneratorService, userMessage, appId);
         } else if (codeGenTypeEnum == CodeGenTypeEnum.MULTI_FILE) {
+            AiCodeGeneratorService aiCodeGeneratorService = (AiCodeGeneratorService)
+                    aiCodeGeneratorServiceFactory.getAiCodeGeneratorService(realAppId, codeGenTypeEnum);
             return generateAndSaveMultiFileCodeStream(aiCodeGeneratorService, userMessage, appId);
         } else if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
-            return generateAndSaveVueProjectCodeStream(aiCodeGeneratorService, userMessage, appId);
+            return generateAndSaveVueProjectCodeStream(userMessage, appId);
         } else {
             String errorMessage = "不支持的生成类型" + codeGenTypeEnum.getValue();
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, errorMessage);
@@ -120,17 +127,32 @@ public class AiCodeGeneratorFacade {
 
     /**
      * 生成vue项目代码比保存
-     * @param aiCodeGeneratorService
      * @param userMessage
      * @param appId
      * @return
      */
-    private Flux<String> generateAndSaveVueProjectCodeStream(AiCodeGeneratorService aiCodeGeneratorService,
-                                                             String userMessage,
+    private Flux<String> generateAndSaveVueProjectCodeStream(String userMessage,
                                                              Long appId) {
-        // Vue 工程模式下，代码由 FileWriteTool 直接写入到项目目录，
-        // 这里主要负责把推理模型的思考过程 / 计划 / 工具调用说明按流式返回给前端展示。
-        TokenStream tokenStream = aiCodeGeneratorService.generateProjectCodeStream(appId, userMessage);
+        // 判断是创建还是修改
+        // 检查项目目录是否存在且包含 package.json
+        String projectDirName = "vue_project_" + appId;
+        Path projectRoot = Paths.get(AppConstant.CODE_OUTPUT_ROOT_DIR, projectDirName).toAbsolutePath().normalize();
+        Path packageJsonPath = projectRoot.resolve("package.json");
+        
+        TokenStream tokenStream;
+        
+        if (Files.exists(projectRoot) && Files.exists(packageJsonPath)) {
+            // 项目已存在，使用修改服务（包含所有工具）
+            log.info("Vue项目已存在，使用修改模式: {}", appId);
+            AiVueModifyService modifyService = aiCodeGeneratorServiceFactory.getVueModifyService(appId);
+            tokenStream = modifyService.generateProjectCodeStream(appId, userMessage);
+        } else {
+            // 项目不存在，使用创建服务（只包含写入工具）
+            log.info("Vue项目不存在，使用创建模式: {}", appId);
+            AiVueCreateService createService = aiCodeGeneratorServiceFactory.getVueCreateService(appId);
+            tokenStream = createService.generateProjectCodeStream(appId, userMessage);
+        }
+
         Flux<String> fluxResult = processTokenStream(tokenStream);
         StringBuilder contentBuilder = new StringBuilder();
         return fluxResult
