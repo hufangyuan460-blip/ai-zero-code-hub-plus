@@ -2,6 +2,7 @@ package com.swu.aiZeroCodeHub.service.impl;
 
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.io.FileUtil;
+import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import com.mybatisflex.core.paginate.Page;
 import com.mybatisflex.core.query.QueryWrapper;
@@ -27,9 +28,7 @@ import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
 import com.swu.aiZeroCodeHub.service.AppService;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
-import com.swu.aiZeroCodeHub.service.ScreenshotService;
 import com.swu.aiZeroCodeHub.service.UserService;
-import com.swu.aiZeroCodeHub.aiTool.FileWriteTool;
 import jakarta.annotation.Resource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -38,10 +37,7 @@ import reactor.core.publisher.Flux;
 
 import java.io.File;
 import java.time.LocalDateTime;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 
@@ -78,10 +74,6 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     private StreamHandlerExecutor streamHandlerExecutor;
     @Autowired
     private VueProjectBuilder vueProjectBuilder;
-    @Autowired
-    private ScreenshotService screenshotService;
-    @Autowired
-    private FileWriteTool fileWriteTool;
 
     @Override
     public long createApp(AppCreateRequest appCreateRequest, jakarta.servlet.http.HttpServletRequest request) {
@@ -311,15 +303,6 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         }
         AppVO appVo = new AppVO();
         BeanUtils.copyProperties(app, appVo);
-        String cover = appVo.getCover();
-        String localCover = String.format("/api/static/covers/%d.jpg", appVo.getId());
-        String localCoverPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + "covers" + File.separator + appVo.getId() + ".jpg";
-        if (cover == null || cover.isBlank() || cover.contains("/screenshots/")) {
-            File localFile = new File(localCoverPath);
-            if (localFile.exists() && localFile.isFile() && localFile.length() > 0) {
-                appVo.setCover(localCover);
-            }
-        }
         return appVo;
     }
 
@@ -450,43 +433,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         // 2. 调用AI生成，并捕获响应流
         Flux<String> fluxResponse = aiCodeGeneratorFacade.generateAndSaveCodeStream(message, codeGenTypeEnum, appId);
 
-        Flux<String> handledFlux = streamHandlerExecutor.doExecute(fluxResponse,chatHistoryService,appId,loginUser,codeGenTypeEnum);
-        return handledFlux.doOnComplete(() -> {
-            Thread.startVirtualThread(() -> {
-                try {
-                    App latestApp = this.getById(appId);
-                    if (latestApp == null) {
-                        return;
-                    }
-                    String sourceDirName = codeGenTypeEnum.getValue() + "_" + appId;
-                    String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
-                    File sourceDir = new File(sourceDirPath);
-                    boolean dirReady = waitForDirectoryReady(sourceDir, 60, 1000L);
-                    if (!dirReady) {
-                        log.error("应用代码不存在，无法自动部署：{}", sourceDirPath);
-                        return;
-                    }
-                    if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
-                        boolean vueReady = waitForVueProjectReady(appId, sourceDirPath, 120, 1000L);
-                        if (!vueReady) {
-                            log.error("Vue 项目未就绪，无法自动部署：{}", sourceDirPath);
-                            return;
-                        }
-                        deployVueProject(appId, sourceDirName, sourceDirPath, latestApp);
-                    } else {
-                        File indexFile = new File(sourceDir, "index.html");
-                        boolean ready = waitForFileReady(indexFile, 20, 1000L);
-                        if (!ready) {
-                            log.error("index.html 未就绪，无法自动部署：{}", indexFile.getAbsolutePath());
-                            return;
-                        }
-                        deployStandardProject(appId, sourceDirName, sourceDir, latestApp);
-                    }
-                } catch (Exception e) {
-                    log.error("自动部署并生成封面失败，appId: {}", appId, e);
-                }
-            });
-        });
+        //3. 调用流处理执行器处理流
+        return streamHandlerExecutor.doExecute(fluxResponse,chatHistoryService,appId,loginUser,codeGenTypeEnum);
     }
 
 
@@ -515,339 +463,75 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
 
     /**
      * 部署AI生成的网页代码
+     * @param appId
+     * @param loginUser
+     * @return
      */
     @Override
-    public String deployApp(Long appId, User loginUser) {
-        // 参数校验（保持不变）
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用ID不能为空");
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(loginUser == null, ErrorCode.NOT_LOGIN_ERROR, "用户未登陆");
-
-        // 查询应用
-        App app = this.getById(appId);
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
+    public String deployApp(Long appId,User loginUser){
+        //参数校验
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId==null||appId<=0,ErrorCode.PARAM_ERROR,"应用ID不能为空");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(loginUser==null,ErrorCode.NOT_LOGIN_ERROR,"用户未登陆");
+        //查询应用
+        App app=this.getById(appId);
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app==null,ErrorCode.NOT_FOUND_ERROR,"应用不存在");
         if (!app.getUserId().equals(loginUser.getId())) {
-            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限部署应用");
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR,"无权限部署应用");
+        }
+        //检查是否已经有deployKey
+        String deployKey = app.getDeployKey();
+        //6位大小写加数字
+        if (StrUtil.isBlank(deployKey)) {
+            deployKey = RandomUtil.randomString(6);
         }
 
-        // 获取源代码目录
+        //获取代码类型，构建源目录
         String codeGenType = app.getCodeGenType();
+        String sourceDirName=codeGenType+"_"+appId;
+        String sourceDirPath= AppConstant.CODE_OUTPUT_ROOT_DIR+ File.separator+sourceDirName;
+        //检查目录是否存在,而非文件或者不存在
+        File sourceDir=new File(sourceDirPath);
+        if (!sourceDir.exists()||!sourceDir.isDirectory()) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR,"应用代码不存在，请先生成代码");
+        }
+
+        //! 如果部署的是vue项目，使用单独部署器部署
+        // 7. Vue项目特殊处理：执行构建
         CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(codeGenType);
-        if (codeGenTypeEnum == null) {
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "不支持的代码生成类型");
-        }
-        String sourceDirName = codeGenTypeEnum.getValue() + "_" + appId;
-        String sourceDirPath = AppConstant.CODE_OUTPUT_ROOT_DIR + File.separator + sourceDirName;
-        String deployKey = sourceDirName;
-
-        File sourceDir = new File(sourceDirPath);
-        if (!sourceDir.exists() || !sourceDir.isDirectory()) {
-            throw new BusinessException(ErrorCode.PARAM_ERROR, "应用代码不存在，请先生成代码");
-        }
-
-        // Vue项目特殊处理
         if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
-            return deployVueProject(appId, deployKey, sourceDirPath, app);
-        } else {
-            return deployStandardProject(appId, deployKey, sourceDir, app);
-        }
-    }
-
-    /**
-     * 部署Vue项目
-     */
-    private String deployVueProject(Long appId, String deployKey, String sourceDirPath, App app) {
-        try {
-            log.info("开始部署Vue项目，appId: {}, sourceDir: {}", appId, sourceDirPath);
-
-            // 1. 构建Vue项目
-            boolean ready = waitForVueProjectReady(appId, sourceDirPath, 90, 1000L);
-            if (!ready) {
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "Vue项目生成未完成，无法部署");
-            }
-            log.info("执行Vue项目构建...");
+            // Vue项目需要构建
             boolean buildSuccess = vueProjectBuilder.buildProject(sourceDirPath);
-            if (!buildSuccess) {
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR, "Vue项目构建失败");
-            }
+            ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!buildSuccess, ErrorCode.SYSTEM_ERROR, "Vue项目构建失败，请检查代码和依赖");
 
-            // 2. 检查构建输出目录
+            // 检查dist目录是否存在
             File distDir = new File(sourceDirPath, "dist");
-            File htmlDir = new File(sourceDirPath, "html"); // 有些配置可能输出到html目录
+            ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!distDir.exists(), ErrorCode.SYSTEM_ERROR, "Vue项目构建完成但未生成dist目录");
 
-            File buildOutputDir = null;
-            if (distDir.exists() && distDir.isDirectory()) {
-                buildOutputDir = distDir;
-                log.info("检测到dist目录: {}", distDir.getAbsolutePath());
-            } else if (htmlDir.exists() && htmlDir.isDirectory()) {
-                buildOutputDir = htmlDir;
-                log.info("检测到html目录: {}", htmlDir.getAbsolutePath());
-            } else {
-                // 检查其他可能的输出目录
-                File[] possibleDirs = new File(sourceDirPath).listFiles((dir, name) ->
-                        name.equals("dist") || name.equals("html") || name.equals("build") || name.equals("output"));
-
-                if (possibleDirs != null && possibleDirs.length > 0) {
-                    for (File dir : possibleDirs) {
-                        if (dir.isDirectory()) {
-                            buildOutputDir = dir;
-                            log.info("检测到构建输出目录: {}", dir.getAbsolutePath());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (buildOutputDir == null) {
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR,
-                        "Vue项目构建成功但未找到输出目录，请检查构建配置");
-            }
-
-            // 3. 准备部署目录
-            String deployDirPath = AppConstant.CODE_DEPLOY_ROOT_DIR + File.separator + deployKey;
-            File deployDir = new File(deployDirPath);
-
-            // 清理已存在的部署目录
-            if (deployDir.exists()) {
-                FileUtil.del(deployDir);
-            }
-            FileUtil.mkdir(deployDir);
-
-            // 4. 复制构建结果到部署目录
-            log.info("复制构建文件从 {} 到 {}", buildOutputDir.getAbsolutePath(), deployDirPath);
-            FileUtil.copyContent(buildOutputDir, deployDir, true);
-
-            // 5. 验证部署文件
-            File indexFile = new File(deployDir, "index.html");
-            if (!indexFile.exists()) {
-                // 检查其他可能的入口文件
-                String[] possibleIndexFiles = {"index.html", "Index.html", "INDEX.HTML"};
-                boolean foundIndex = false;
-                for (String fileName : possibleIndexFiles) {
-                    if (new File(deployDir, fileName).exists()) {
-                        foundIndex = true;
-                        break;
-                    }
-                }
-                if (!foundIndex) {
-                    log.warn("部署目录中未找到index.html文件，部署内容: {}",
-                            Arrays.toString(deployDir.list()));
-                }
-            }
-
-            // 6. 更新应用部署信息
-            updateAppDeployInfo(appId, deployKey);
-
-            // 部署地址
-            String appDeployUrl = String.format("%s/%s/index.html", AppConstant.CODE_DEPLOY_HOST, deployKey);
-            //异步截图生成封面
-            generateAppScreenshotAsync(appId, appDeployUrl);
-            log.info("Vue项目部署成功，访问地址: {}", appDeployUrl);
-            return appDeployUrl;
-
-        } catch (BusinessException e) {
-            throw e;
-        } catch (Exception e) {
-            log.error("Vue项目部署失败", e);
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "Vue项目部署失败: " + e.getMessage());
+            // 将dist目录作为部署源
+            sourceDir = distDir;
+            log.info("Vue项目构建成功，将部署dist目录: {}", distDir.getAbsolutePath());
         }
-    }
-
-    /**
-     * 部署标准项目（非Vue）
-     */
-    private String deployStandardProject(Long appId, String deployKey, File sourceDir, App app) {
-        try {
-            log.info("开始部署标准项目，appId: {}, sourceDir: {}", appId, sourceDir.getAbsolutePath());
-
-            String deployDirPath = AppConstant.CODE_DEPLOY_ROOT_DIR + File.separator + deployKey;
-            File deployDir = new File(deployDirPath);
-
-            // 清理已存在的部署目录
-            if (deployDir.exists()) {
-                FileUtil.del(deployDir);
-            }
-            FileUtil.mkdir(deployDir);
-
-            // 复制文件到部署目录
-            FileUtil.copyContent(sourceDir, deployDir, true);
-
-            // 更新应用部署信息
-            updateAppDeployInfo(appId, deployKey);
-
-            // 部署地址
-            String appDeployUrl = String.format("%s/%s/index.html", AppConstant.CODE_DEPLOY_HOST, deployKey);
-            //异步截图生成封面
-            generateAppScreenshotAsync(appId, appDeployUrl);
 
 
-            return appDeployUrl;
+        //复制文件到部署目录
+        String deployDirPath=AppConstant.CODE_DEPLOY_ROOT_DIR+File.separator+deployKey;
+        try{
+            FileUtil.copyContent(sourceDir,new File(deployDirPath),true);
 
-        } catch (Exception e) {
-            log.error("标准项目部署失败", e);
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "项目部署失败: " + e.getMessage());
+        }catch (Exception e){
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"部署失败:"+e.getMessage());
         }
-    }
 
-    /**
-     * 异步截图
-     * @param appId
-     * @param appUrl
-     */
-    private void generateAppScreenshotAsync(Long appId, String appUrl) {
-        generateAppScreenshotAsync(appId, appUrl, 2);
-    }
-
-    private void generateAppScreenshotAsync(Long appId, String appUrl, int retries) {
-        Thread.startVirtualThread(() -> {
-            try {
-                boolean ready = waitForUrlReady(appUrl, 12, 3000L);
-                if (!ready) {
-                    if (retries > 0) {
-                        try {
-                            Thread.sleep(30000L);
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            return;
-                        }
-                        generateAppScreenshotAsync(appId, appUrl, retries - 1);
-                    } else {
-                        log.error("封面截图页面未就绪，appId: {}，appUrl: {}", appId, appUrl);
-                    }
-                    return;
-                }
-                String screenshotUrl = screenshotService.generateAndUploadScreenshot(appId, appUrl);
-                App updateApp = new App();
-                updateApp.setId(appId);
-                updateApp.setCover(screenshotUrl);
-                boolean updated = this.updateById(updateApp);
-                if (!updated) {
-                    log.error("更新应用封面字段失败，appId: {}", appId);
-                } else {
-                    log.info("应用封面已更新，appId: {}，截图URL: {}", appId, screenshotUrl);
-                }
-            } catch (Exception e) {
-                log.error("异步生成应用截图失败，appId: {}，appUrl: {}", appId, appUrl, e);
-            }
-        });
-    }
-
-    private boolean waitForFileReady(File file, int attempts, long sleepMs) {
-        for (int i = 0; i < attempts; i++) {
-            if (file.exists() && file.isFile() && file.length() > 0) {
-                return true;
-            }
-            try {
-                Thread.sleep(sleepMs);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-        return false;
-    }
-
-    private boolean waitForDirectoryReady(File dir, int attempts, long sleepMs) {
-        for (int i = 0; i < attempts; i++) {
-            if (dir.exists() && dir.isDirectory()) {
-                File[] files = dir.listFiles();
-                if (files != null && files.length > 0) {
-                    return true;
-                }
-            }
-            try {
-                Thread.sleep(sleepMs);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-        return false;
-    }
-
-    private boolean waitForUrlReady(String url, int attempts, long sleepMs) {
-        for (int i = 0; i < attempts; i++) {
-            int code = getStatusCode(url);
-            if (code >= 200 && code < 300) {
-                return true;
-            }
-            try {
-                Thread.sleep(sleepMs);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-        return false;
-    }
-
-    private int getStatusCode(String urlStr) {
-        HttpURLConnection connection = null;
-        try {
-            URL url = new URL(urlStr);
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setConnectTimeout(5000);
-            connection.setReadTimeout(5000);
-            connection.setRequestMethod("GET");
-            connection.setInstanceFollowRedirects(true);
-            return connection.getResponseCode();
-        } catch (Exception e) {
-            return -1;
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
-        }
-    }
-
-    private boolean waitForVueProjectReady(Long appId, String sourceDirPath, int attempts, long sleepMs) {
-        File projectDir = new File(sourceDirPath);
-        if (!projectDir.exists() || !projectDir.isDirectory()) {
-            return false;
-        }
-        File packageJson = new File(projectDir, "package.json");
-        File viteConfigJs = new File(projectDir, "vite.config.js");
-        File viteConfigTs = new File(projectDir, "vite.config.ts");
-        File srcDir = new File(projectDir, "src");
-        File mainJs = new File(srcDir, "main.js");
-        File mainTs = new File(srcDir, "main.ts");
-        File appVue = new File(srcDir, "App.vue");
-        for (int i = 0; i < attempts; i++) {
-            boolean filesReady = packageJson.exists()
-                    && (viteConfigJs.exists() || viteConfigTs.exists())
-                    && srcDir.exists()
-                    && (mainJs.exists() || mainTs.exists())
-                    && appVue.exists();
-            boolean statusReady = true;
-            if (fileWriteTool.hasGenerationStatus(appId)) {
-                statusReady = fileWriteTool.isGenerationCompleted(appId) && fileWriteTool.isWriteIdle(appId, 3000L);
-            }
-            if (filesReady && statusReady) {
-                return true;
-            }
-            try {
-                Thread.sleep(sleepMs);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 更新应用部署信息
-     */
-    private void updateAppDeployInfo(Long appId, String deployKey) {
-        App updatedApp = new App();
+        //更新应用的deployKey和部署时间
+        App updatedApp=new App();
         updatedApp.setId(appId);
         updatedApp.setDeployKey(deployKey);
         updatedApp.setDeployedTime(LocalDateTime.now());
-
         boolean updateResult = this.updateById(updatedApp);
-        if (!updateResult) {
-            log.error("更新应用部署信息失败，appId: {}", appId);
-            throw new BusinessException(ErrorCode.OPERATION_ERROR, "更新应用部署信息失败");
-        }
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!updateResult,ErrorCode.OPERATION_ERROR,"更新应用部署信息失败");
+        //返回可访问URL
+        return String.format("%s/%s/",AppConstant.CODE_DEPLOY_HOST,deployKey);
+
     }
 
 

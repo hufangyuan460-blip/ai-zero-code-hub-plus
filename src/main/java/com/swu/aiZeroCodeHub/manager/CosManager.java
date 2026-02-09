@@ -1,9 +1,9 @@
 package com.swu.aiZeroCodeHub.manager;
 
 import com.qcloud.cos.COSClient;
+import com.qcloud.cos.model.CannedAccessControlList;
 import com.qcloud.cos.model.PutObjectRequest;
 import com.qcloud.cos.model.PutObjectResult;
-import com.qcloud.cos.model.CannedAccessControlList;
 import com.swu.aiZeroCodeHub.config.CosClientConfig;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;

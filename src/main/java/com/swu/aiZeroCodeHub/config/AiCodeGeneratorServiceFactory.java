@@ -37,17 +37,8 @@ public class AiCodeGeneratorServiceFactory {
     @Resource
     private StreamingChatModel reasoningStreamingChatModel;
     @Resource
-    @org.springframework.context.annotation.Lazy
     private FileWriteTool fileWriteTool;
 
-    // 解决循环依赖：AiCodeGeneratorFacade 依赖 Factory，Factory 依赖 Facade (间接) 导致构造失败
-    // 但实际上 Factory 并不依赖 Facade，问题出在 Facade 注入 Factory 时可能未初始化完成
-    // 或者是 Facade 的构造函数注入有问题
-    // 在 AiCodeGeneratorFacade 中，CodeParserExecutor 和 CodeFileSaverExecutor 是通过字段注入的
-    // 而这两个类都使用了 @Service 且有构造函数注入
-    // 检查 AiCodeGeneratorFacade 自身是否有构造函数抛出异常
-    // 日志显示: Failed to instantiate [com.swu.aiZeroCodeHub.core.AiCodeGeneratorFacade]: Constructor threw exception
-    // 看起来是 Facade 的构造函数或字段注入时出了问题
 
     /**
      * 根据生成类型创建AiCodeGeneratorService实例
@@ -60,10 +51,10 @@ public class AiCodeGeneratorServiceFactory {
         MessageWindowChatMemory chatMemory = MessageWindowChatMemory.builder()
                 .id(appId)
                 .chatMemoryStore(redisChatMemoryStore)
-                .maxMessages(Integer.MAX_VALUE)
+                .maxMessages(1000)
                 .build();
         //从数据库加载历史数据到记忆中
-        chatHistoryService.loadChatHistoryToMemory(appId, chatMemory, Integer.MAX_VALUE);
+        chatHistoryService.loadChatHistoryToMemory(appId,chatMemory,20);
 
 
 
@@ -135,3 +126,4 @@ public class AiCodeGeneratorServiceFactory {
         return appId + "_" + codeGenType.getValue();
     }
 }
+

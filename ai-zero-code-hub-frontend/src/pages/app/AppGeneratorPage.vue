@@ -19,7 +19,7 @@ const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
 const deployedUrl = ref<string>('')
-const codeGenType = ref('html') // 下拉选择：支持 'html' | 'multi_file' | 'vue_project'
+const codeGenType = ref('vue_project')
 const codeGenTypeMap: Record<string, string> = {
   html: '原生 HTML',
   multi_file: '原生多文件',
@@ -87,9 +87,8 @@ const loadAppInfo = async (silent = false) => {
     const res = await getMyAppInfo(appId)
     if (res) {
       app.value = res
-      if (res.codeGenType) {
-        codeGenType.value = res.codeGenType
-      }
+      // 强制使用 Vue 工程项目类型，确保触发工具调用与部署链路
+      codeGenType.value = 'vue_project'
       if (res.deployKey && res.deployedTime) {
         deployedUrl.value = `/api/app/${res.deployKey}/index.html`
       } else {
@@ -242,30 +241,39 @@ const onGenerate = async (prompt: string) => {
     resetDeployTimeout();
 
     try {
-      // 1. Check if the event data is a valid JSON string
       let data;
       try {
           data = JSON.parse(event.data);
       } catch {
-          // Not a JSON object, treat as raw string
           data = event.data;
       }
 
-      // 2. Handle structured data vs raw string
-      // The backend usually sends JSON with 'content' field for chunks
-      // But sometimes (e.g. from some models) it might send raw text or different structure
       if (typeof data === 'object' && data !== null) {
-          if (data.content) {
+          if (data.type) {
+             if (data.type === 'ai_response' && typeof data.data === 'string') {
+               messages.value[aiMsgIndex]!.content += data.data
+             } else if (data.type === 'tool_request') {
+               messages.value[aiMsgIndex]!.content += '\n\n[选择工具] 写入文件\n\n'
+             } else if (data.type === 'tool_executed') {
+               try {
+                 const args = JSON.parse(data.arguments || '{}')
+                 const filePath = args.relativeFilePath || ''
+                 const content = args.content || ''
+                 const suffix = (filePath.split('.').pop() || '')
+                 const block = `\n\n[工具调用] 写入文件 ${filePath}\n\`\`\`${suffix}\n${content}\n\`\`\`\n\n`
+                 messages.value[aiMsgIndex]!.content += block
+               } catch {
+                 messages.value[aiMsgIndex]!.content += JSON.stringify(data)
+               }
+             } else {
+               messages.value[aiMsgIndex]!.content += JSON.stringify(data)
+             }
+          } else if (data.content) {
              messages.value[aiMsgIndex]!.content += data.content
           } else {
-             // Fallback: append stringified object or specific field if known
-             // For now, if no content field, maybe ignore or append raw
-             // console.warn("Received object without content field:", data);
-             // Optionally append entire JSON if debugging:
-             // messages.value[aiMsgIndex].content += JSON.stringify(data);
+             messages.value[aiMsgIndex]!.content += JSON.stringify(data)
           }
       } else {
-         // Raw string data
          messages.value[aiMsgIndex]!.content += data
       }
 

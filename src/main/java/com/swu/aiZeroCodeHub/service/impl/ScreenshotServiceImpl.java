@@ -2,8 +2,8 @@ package com.swu.aiZeroCodeHub.service.impl;
 
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
+import com.swu.aiZeroCodeHub.utils.WebScreenshotUtils;
 import com.swu.aiZeroCodeHub.constant.AppConstant;
-import com.swu.aiZeroCodeHub.common.utils.WebScreenshotUtils;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
 import com.swu.aiZeroCodeHub.manager.CosManager;
@@ -13,9 +13,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
-import java.util.UUID;
 
 @Service
 @Slf4j
@@ -53,9 +50,9 @@ public class ScreenshotServiceImpl implements ScreenshotService {
 
     /**
      * 上传截图到对象存储
-     * @param localScreenshotPath 本地截图路径
-     * @param appId 应用ID（用于统一命名）
-     * @return 对象存储访问URL，失败返回null
+     * @param coverFile
+     * @param appId
+     * @return
      */
     private String uploadScreenshotToCos(File coverFile, Long appId) {
         if (coverFile == null) {

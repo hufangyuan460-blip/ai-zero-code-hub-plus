@@ -63,19 +63,8 @@ public class JsonMessageStreamHandler {
                 .doOnComplete(() -> {
                     // 保存对话历史
                     String aiResponse = chatHistoryStringBuilder.toString();
-                    log.info("SSE流处理完成，保存对话历史长度: {}", aiResponse.length());
                     if (StrUtil.isNotBlank(aiResponse)) {
                         saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser,chatHistoryService);
-                    }
-                })
-                .doOnCancel(() -> {
-                    // 客户端断开连接时，也保存已生成的内容
-                    log.info("客户端断开连接，保存已生成的对话历史");
-                    String aiResponse = chatHistoryStringBuilder.toString();
-                    if (StrUtil.isNotBlank(aiResponse)) {
-                        // 标记为中断
-                        aiResponse += "\n\n[连接中断，生成已停止]";
-                        saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser, chatHistoryService);
                     }
                 })
                 .doOnError(error -> {
@@ -137,7 +126,6 @@ public class JsonMessageStreamHandler {
 
                 // 输出前端和要持久化的内容
                 String output = String.format("\n\n%s\n\n", result);
-                log.info("处理工具执行消息: toolId={}, filePath={}", toolExecutedMessage.getId(), relativeFilePath);
                 chatHistoryStringBuilder.append(output);
                 return output;
             }

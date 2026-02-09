@@ -26,9 +26,5 @@ public class CorsConfig implements WebMvcConfigurer {
         // 映射生成代码的预览路径：/static/** -> 本地文件系统 CODE_OUTPUT_ROOT_DIR
         registry.addResourceHandler("/static/**")
                 .addResourceLocations("file:" + AppConstant.CODE_OUTPUT_ROOT_DIR + "/");
-
-        // 映射部署代码的访问路径：/app/** -> 本地文件系统 CODE_DEPLOY_ROOT_DIR
-        registry.addResourceHandler("/app/**")
-                .addResourceLocations("file:" + AppConstant.CODE_DEPLOY_ROOT_DIR + "/");
     }
 }

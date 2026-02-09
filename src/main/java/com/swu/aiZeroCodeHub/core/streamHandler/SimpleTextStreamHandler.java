@@ -40,14 +40,6 @@ public class SimpleTextStreamHandler {
                     String aiResponse = aiResponseBuilder.toString();
                     saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser, chatHistoryService);
                 })
-                .doOnCancel(() -> {
-                    // 客户端断开连接时，也保存已生成的内容
-                    String aiResponse = aiResponseBuilder.toString();
-                    if (!aiResponse.isEmpty()) {
-                        aiResponse += "\n\n[连接中断，生成已停止]";
-                        saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser, chatHistoryService);
-                    }
-                })
                 .doOnError(error -> {
                     // 如果AI回复失败，也要记录错误消息
                     String errorMessage = "AI回复失败: " + error.getMessage();

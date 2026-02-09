@@ -1,4 +1,4 @@
-package com.swu.aiZeroCodeHub.common.utils;
+package com.swu.aiZeroCodeHub.utils;
 
 import cn.hutool.core.img.ImgUtil;
 import cn.hutool.core.io.FileUtil;

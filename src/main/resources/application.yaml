@@ -41,8 +41,8 @@ knife4j:
 langchain4j:
   open-ai:
     chat-model:
-      base-url: https://api.deepseek.com
-      api-key: ${DEEPSEEK_API_KEY:sk-test}
+      base-url: https://api.deepseek.com/v1
+      api-key: ${DEEPSEEK_API_KEY}
       model-name: deepseek-chat
       log-responses: true
       log-requests: true
@@ -53,7 +53,7 @@ langchain4j:
       response-format: json_object
 #    流式输出
     streaming-chat-model:
-        base-url: https://api.deepseek.com
+        base-url: https://api.deepseek.com/v1
         api-key: ${DEEPSEEK_API_KEY:sk-test}
         model-name: deepseek-chat
         log-responses: true
