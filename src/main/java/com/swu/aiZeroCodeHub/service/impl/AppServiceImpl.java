@@ -487,12 +487,6 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         if (!app.getUserId().equals(loginUser.getId())) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR,"无权限部署应用");
         }
-        //检查是否已经有deployKey
-        String deployKey = app.getDeployKey();
-        //6位大小写加数字
-        if (StrUtil.isBlank(deployKey)) {
-            deployKey = appId + "-" + RandomUtil.randomString(4);
-        }
 
         CodeOutputResolveResult resolveResult = resolveCodeOutputDir(appId, app.getCodeGenType());
         if (resolveResult == null) {
@@ -500,9 +494,13 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         }
         String codeGenType = resolveResult.codeGenType;
         File sourceDir = resolveResult.dir;
+
+        // 统一 code_deploy 与 code_output 的目录命名规则：{type}_{appId}
+        // 这样部署后的 URL 路径也更具语义，且多次部署会覆盖同一目录（符合预览/更新逻辑）
+        String deployKey = codeGenType + "_" + appId;
         String sourceDirPath = sourceDir.getAbsolutePath();
 
-        //! 如果部署的是vue项目，使用单独部署器部署
+        // 如果部署的是vue项目，使用单独部署器部署
         // 7. Vue项目特殊处理：执行构建
         CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(codeGenType);
         if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {

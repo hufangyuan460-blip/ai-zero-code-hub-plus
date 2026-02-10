@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, computed, watch } from 'vue'
+import { ref, onMounted, nextTick, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { getMyAppInfo, deployApp, getDownloadLink, type AppVO } from '@/api/app'
+import { getMyAppInfo, deployApp, getDownloadLink, captureAndUploadScreenshot, type AppVO } from '@/api/app'
 import { listChatHistoryByPage, type ChatHistoryVO } from '@/api/chat'
 import { request } from '@/api/request'
 import { useUserStore } from '@/stores/user'
 import { useVisualEditor } from '@/composables/useVisualEditor'
-import { FormOutlined, SendOutlined } from '@ant-design/icons-vue'
+import { FormOutlined, SendOutlined, FullscreenOutlined } from '@ant-design/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -63,7 +63,11 @@ const previewUrl = computed(() => {
   if (deployedUrl.value) return deployedUrl.value
   if (!app.value) return ''
   // Use relative path for local preview to support Same-Origin (via proxy)
-  return `/api/static/${codeGenType.value || 'website'}_${app.value.id}/index.html?t=${new Date().getTime()}`
+  // 修正预览路径逻辑：
+  // 1. 如果是 vue_project，目录通常是 vue_project_{appId}
+  // 2. 如果是 html 或 multi_file，目录通常是 website_{appId}
+  const dirPrefix = codeGenType.value === 'vue_project' ? 'vue_project' : 'website'
+  return `/api/static/${dirPrefix}_${app.value.id}/index.html?t=${new Date().getTime()}`
 })
 const iframeRef = ref<HTMLIFrameElement>()
 const downloading = ref(false)
@@ -87,8 +91,8 @@ const loadAppInfo = async (silent = false) => {
     const res = await getMyAppInfo(appId)
     if (res) {
       app.value = res
-      // 强制使用 Vue 工程项目类型，确保触发工具调用与部署链路
-      codeGenType.value = 'vue_project'
+      // 使用后端返回的实际类型
+      codeGenType.value = res.codeGenType || 'html'
       if (res.deployKey && res.deployedTime) {
         deployedUrl.value = `/api/app/${res.deployKey}/index.html`
       } else {
@@ -103,6 +107,14 @@ const loadAppInfo = async (silent = false) => {
     if (!silent) {
       loading.value = false
     }
+  }
+}
+
+const handleFullscreen = () => {
+  if (previewUrl.value) {
+    window.open(previewUrl.value, '_blank')
+  } else {
+    message.warning('暂无预览链接')
   }
 }
 
@@ -181,27 +193,37 @@ const forceDeploy = async () => {
     messages.value[aiMsgIndexRef.value]!.loading = false;
   }
 
-  if (app.value && codeGenType.value === 'vue_project') {
+  if (app.value) {
       try {
         deploying.value = true
-        message.loading({ content: '生成完毕（或长时间未响应），正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...', key: 'auto_deploy', duration: 0 })
+        const loadingMsg = codeGenType.value === 'vue_project'
+          ? '生成完毕（或长时间未响应），正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
+          : '生成完毕（或长时间未响应），正在自动部署中...'
+        
+        message.loading({ content: loadingMsg, key: 'auto_deploy', duration: 0 })
         const url = await deployApp({ appId: app.value.id })
         if (url) {
           deployedUrl.value = url
           message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
+
+          try {
+             const fullUrl = window.location.origin + url
+             await captureAndUploadScreenshot(app.value.id, fullUrl)
+             console.log('自动生成封面成功')
+          } catch (screenshotError) {
+             console.error('自动生成封面失败', screenshotError)
+          }
         }
-      } catch (e) {
+      } catch {
         message.error({ content: '自动部署失败', key: 'auto_deploy' })
       } finally {
         deploying.value = false
-        // 刷新历史记录
         loadHistory(false)
+        if (codeGenType.value !== 'vue_project') {
+           refreshPreview()
+        }
       }
-    } else {
-      deployedUrl.value = ''
-      refreshPreview()
-      loadHistory(false)
-    }
+  }
 };
 
 // SSE Generation
@@ -289,26 +311,35 @@ const onGenerate = async (prompt: string) => {
     messages.value[aiMsgIndex]!.loading = false
     eventSource.close()
 
-    if (app.value && codeGenType.value === 'vue_project') {
+    if (app.value) {
       try {
         deploying.value = true
-        message.loading({ content: '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...', key: 'auto_deploy', duration: 0 })
+        const loadingMsg = codeGenType.value === 'vue_project' 
+          ? '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
+          : '生成完毕，正在自动部署中...'
+        
+        message.loading({ content: loadingMsg, key: 'auto_deploy', duration: 0 })
         const url = await deployApp({ appId: app.value.id })
         if (url) {
           deployedUrl.value = url
           message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
+          try {
+             const fullUrl = window.location.origin + url
+             await captureAndUploadScreenshot(app.value.id, fullUrl)
+             console.log('自动生成封面成功')
+          } catch (screenshotError) {
+             console.error('自动生成封面失败', screenshotError)
+          }
         }
-      } catch (e) {
+      } catch {
         message.error({ content: '自动部署失败', key: 'auto_deploy' })
       } finally {
         deploying.value = false
-        // 刷新历史记录
         loadHistory(false)
+        if (codeGenType.value !== 'vue_project') {
+           refreshPreview()
+        }
       }
-    } else {
-      deployedUrl.value = ''
-      refreshPreview()
-      loadHistory(false)
     }
   })
 
@@ -552,7 +583,11 @@ const onIframeLoad = () => {
       <!-- Preview Area -->
       <div class="preview-area">
         <div class="preview-header">
-            生成后的网页展示
+            <span>生成后的网页展示</span>
+            <a-button type="link" @click="handleFullscreen" title="全屏查看">
+              <template #icon><FullscreenOutlined /></template>
+              全屏
+            </a-button>
         </div>
         <div class="iframe-container">
             <div v-if="messages.some(m => m.loading)" class="preview-loading">
@@ -737,13 +772,14 @@ const onIframeLoad = () => {
   z-index: 1;
 }
 .preview-header {
-    height: 40px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #999;
-    background: #fafafa;
-    border-bottom: 1px solid #f0f0f0;
+  height: 48px;
+  border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  font-weight: 500;
+  background: #fafafa;
 }
 .iframe-container {
     flex: 1;

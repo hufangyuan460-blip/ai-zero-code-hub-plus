@@ -27,14 +27,4 @@ public interface AiCodeGeneratorService {
     @SystemMessage(fromResource = "prompt/codegen-multi-file-system-prompt.txt")
     Flux<String> generateMultiFileCodeStream(String userMessage);
 
-    /**
-     * 生成vue项目代码(流式)
-     * 必须加上 @MemoryId Long appId，类型要和 Tool 中的 @ToolMemoryId 一致
-     */
-    @SystemMessage(fromResource = "prompt/codegen-vueProject-system-prompt.txt")
-    TokenStream generateProjectCodeStream(
-            @MemoryId Long appId,
-            @UserMessage String userMessage
-    );
-
 }

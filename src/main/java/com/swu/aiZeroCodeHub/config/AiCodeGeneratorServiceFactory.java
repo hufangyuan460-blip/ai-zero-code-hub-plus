@@ -62,18 +62,6 @@ public class AiCodeGeneratorServiceFactory {
 
         // 根据代码生成类型选择不同的模型配置
         return switch (codeGenType) {
-            // Vue项目生成使用推理模型
-            case VUE_PROJECT ->
-                    AiServices.builder(AiCodeGeneratorService.class)
-                            .streamingChatModel(reasoningStreamingChatModel)
-                            .chatMemoryProvider(memoryId -> chatMemory)
-                            .tools(toolManager.getAllTools())
-                            //幻觉工具名称策略
-                            .hallucinatedToolNameStrategy(toolExecutionRequest ->
-                                    ToolExecutionResultMessage.from(toolExecutionRequest,
-                                            "Error: there is no tool called " + toolExecutionRequest.name()))
-                            .build();
-
             // HTML和多文件生成使用默认模型
             case HTML, MULTI_FILE ->
                     AiServices.builder(AiCodeGeneratorService.class)

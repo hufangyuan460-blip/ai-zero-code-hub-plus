@@ -60,6 +60,7 @@ langchain4j:
         log-requests: true
         #      合理设置token参数，防止JSON字符串被中途截断
         max-tokens: 8192
+        timeout: 600s
 
 
 # 添加COS对象存储配置（需要从腾讯云获取）
