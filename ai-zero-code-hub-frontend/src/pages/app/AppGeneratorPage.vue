@@ -19,12 +19,17 @@ const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
 const deployedUrl = ref<string>('')
-const codeGenType = ref('vue_project')
+const codeGenType = ref('')
 const codeGenTypeMap: Record<string, string> = {
   html: '原生 HTML',
   multi_file: '原生多文件',
   vue_project: 'Vue 工程项目(复杂项目)'
 }
+const displayCodeGenType = computed(() => {
+  const type = app.value?.codeGenType || codeGenType.value
+  if (!type) return '加载中'
+  return codeGenTypeMap[type] || type
+})
 const previewLoading = ref(false)
 // const coverStatus = ref<'idle' | 'loading' | 'loaded' | 'error'>('idle')
 // const coverUrl = computed(() => app.value?.cover || '')
@@ -66,18 +71,25 @@ const previewUrl = computed(() => {
   // 修正预览路径逻辑：
   // 1. 如果是 vue_project，目录通常是 vue_project_{appId}
   // 2. 如果是 html 或 multi_file，目录通常是 website_{appId}
-  const dirPrefix = codeGenType.value === 'vue_project' ? 'vue_project' : 'website'
+  const type = app.value?.codeGenType || codeGenType.value
+  const dirPrefix = type === 'vue_project' ? 'vue_project' : 'website'
   return `/api/static/${dirPrefix}_${app.value.id}/index.html?t=${new Date().getTime()}`
 })
 const iframeRef = ref<HTMLIFrameElement>()
 const downloading = ref(false)
 const downloadStatus = ref<'idle' | 'preparing' | 'downloading' | 'success' | 'error'>('idle')
 const downloadProgress = ref(0)
+const canDownload = computed(() => {
+  if (deploying.value) return false
+  if (deployedUrl.value) return true
+  return Boolean(app.value?.deployKey && app.value?.deployedTime)
+})
 const downloadText = computed(() => {
   if (downloadStatus.value === 'preparing') return '准备中'
   if (downloadStatus.value === 'downloading') return '下载中'
   if (downloadStatus.value === 'success') return '已完成'
   if (downloadStatus.value === 'error') return '重试下载'
+  if (!canDownload.value) return '部署后下载'
   return '下载源码'
 })
 
@@ -403,6 +415,10 @@ const saveBlob = (blob: Blob, fileName: string) => {
 
 const handleDownload = async () => {
   if (!app.value) return
+  if (!canDownload.value) {
+    message.warning('部署完成之前不可以下载源码')
+    return
+  }
   downloading.value = true
   downloadStatus.value = 'preparing'
   downloadProgress.value = 0
@@ -515,11 +531,11 @@ const onIframeLoad = () => {
             </template>
         </a-button>
         <span class="app-name">{{ app?.appName || '加载中...' }}</span>
-        <a-tag color="blue" style="font-size: 14px; padding: 4px 10px;">{{ codeGenTypeMap[codeGenType] || codeGenType }}</a-tag>
+        <a-tag color="blue" style="font-size: 14px; padding: 4px 10px;">{{ displayCodeGenType }}</a-tag>
       </div>
       <div class="right">
         <div class="download-wrap">
-          <a-button :loading="downloading" @click="handleDownload">{{ downloadText }}</a-button>
+          <a-button :loading="downloading" :disabled="!canDownload" @click="handleDownload">{{ downloadText }}</a-button>
           <a-progress v-if="downloadStatus === 'downloading' && downloadProgress > 0" :percent="downloadProgress" size="small" :show-info="false" />
           <span v-else-if="downloadStatus === 'error'" class="download-error">下载失败</span>
         </div>
