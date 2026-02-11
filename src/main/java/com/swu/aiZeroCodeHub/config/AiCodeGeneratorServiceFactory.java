@@ -18,6 +18,9 @@ import dev.langchain4j.service.AiServices;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -28,8 +31,9 @@ import java.time.Duration;
 @Configuration
 @Slf4j
 public class AiCodeGeneratorServiceFactory {
-    @Resource
-    private ChatModel chatModel;
+    @Autowired
+    @Qualifier("openAiChatModelPrototype")
+    private ObjectProvider<ChatModel> chatModelProvider;
     @Resource
     private StreamingChatModel openAiStreamingChatModel;
     @Resource
@@ -65,7 +69,7 @@ public class AiCodeGeneratorServiceFactory {
             // HTML和多文件生成使用默认模型
             case HTML, MULTI_FILE ->
                     AiServices.builder(AiCodeGeneratorService.class)
-                            .chatModel(chatModel)
+                            .chatModel(chatModelProvider.getObject())
                             .streamingChatModel(openAiStreamingChatModel)
                             .chatMemory(chatMemory)
                             .build();
@@ -163,4 +167,3 @@ public class AiCodeGeneratorServiceFactory {
         return appId + "_" + codeGenType.getValue();
     }
 }
-

@@ -1,12 +1,15 @@
 package com.swu.aiZeroCodeHub.controller;
 
 import cn.hutool.core.util.StrUtil;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mybatisflex.core.paginate.Page;
 import com.swu.aiZeroCodeHub.annotation.AuthCheck;
 import com.swu.aiZeroCodeHub.common.ResultUtils;
 import com.swu.aiZeroCodeHub.common.vo.BaseResponse;
 import com.swu.aiZeroCodeHub.constant.AppConstant;
 import com.swu.aiZeroCodeHub.constant.UserConstant;
+import com.swu.aiZeroCodeHub.core.ratelimit.DistributedRateLimiter;
+import com.swu.aiZeroCodeHub.core.ratelimit.RateLimitException;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
@@ -43,12 +46,12 @@ import reactor.core.publisher.Mono;
 
 import java.io.File;
 import java.time.LocalDateTime;
+import java.util.Map;
 import java.util.LinkedHashSet;
 
 /**
  * 应用 控制层。
  *
- * @author hxyz61
  */
 @RestController
 @RequestMapping("/app")
@@ -62,6 +65,13 @@ public class AppController {
     private ProjectDownloadService projectDownloadService;
     @Autowired
     private ScreenshotService screenshotService;
+    @Autowired
+    private DistributedRateLimiter distributedRateLimiter;
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    private static final long CHAT_GENERATE_CODE_RATE = 1;
+    private static final long CHAT_GENERATE_CODE_INTERVAL_SECONDS = 5;
 
     /**
      * 用户创建应用（必须填写 initPrompt）。
@@ -180,13 +190,51 @@ public class AppController {
                                                           @RequestParam(value = "codeGenType", required = false) String codeGenType,
                                                           HttpServletRequest request) {
         User loginUser = userService.getLoginUser(request);
+        String rateKey = "rate:sse:chat:gen:code:user:" + loginUser.getId();
+        boolean acquired = distributedRateLimiter.tryAcquire(rateKey, CHAT_GENERATE_CODE_RATE, CHAT_GENERATE_CODE_INTERVAL_SECONDS);
+        if (!acquired) {
+            return sseError(new RateLimitException("请求过于频繁，请稍后再试", CHAT_GENERATE_CODE_INTERVAL_SECONDS));
+        }
         Flux<String> flux = appService.chatToGenCode(appId, userMessage, codeGenType, loginUser);
         Flux<ServerSentEvent<String>> stream = flux.map(chunk ->
                 ServerSentEvent.builder(chunk).build()
         );
-        return stream.concatWith(Flux.just(ServerSentEvent.builder("")
-                .event("done")
-                .build()));
+        ServerSentEvent<String> done = ServerSentEvent.builder("").event("done").build();
+        return stream.concatWith(Mono.just(done))
+                .onErrorResume(this::sseError);
+    }
+
+    private Flux<ServerSentEvent<String>> sseError(Throwable throwable) {
+        int code = ErrorCode.SYSTEM_ERROR.getCode();
+        String message = "系统内部异常";
+        String page = null;
+        if (throwable instanceof RateLimitException rateLimitException) {
+            code = ErrorCode.RATE_LIMIT_ERROR.getCode();
+            message = rateLimitException.getMessage();
+            page = "<html><body><h2>请求过于频繁</h2><p>请在 " + rateLimitException.getRetryAfterSeconds() + " 秒后重试</p></body></html>";
+        } else if (throwable instanceof dev.langchain4j.guardrail.GuardrailException) {
+            code = ErrorCode.FORBIDDEN_ERROR.getCode();
+            message = "检测到不安全的提示词输入，已拦截";
+            page = "<html><body><h2>请求已拦截</h2><p>检测到不安全的提示词输入，请修改后重试</p></body></html>";
+        } else if (throwable instanceof BusinessException businessException) {
+            code = businessException.getCode();
+            message = businessException.getMessage();
+        } else if (throwable != null && StrUtil.isNotBlank(throwable.getMessage())) {
+            message = throwable.getMessage();
+        }
+        String json;
+        try {
+            json = objectMapper.writeValueAsString(Map.of(
+                    "code", code,
+                    "message", message,
+                    "page", page
+            ));
+        } catch (Exception e) {
+            json = "{\"code\":" + code + ",\"message\":\"" + message + "\"}";
+        }
+        ServerSentEvent<String> error = ServerSentEvent.builder(json).event("error").build();
+        ServerSentEvent<String> done = ServerSentEvent.builder("").event("done").build();
+        return Flux.just(error, done);
     }
 
     /**

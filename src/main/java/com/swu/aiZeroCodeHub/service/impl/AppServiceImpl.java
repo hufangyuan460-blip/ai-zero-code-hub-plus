@@ -4,6 +4,9 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.crypto.digest.DigestUtil;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mybatisflex.core.paginate.Page;
 import com.mybatisflex.core.query.QueryWrapper;
 import com.mybatisflex.spring.service.impl.ServiceImpl;
@@ -31,11 +34,13 @@ import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import com.swu.aiZeroCodeHub.service.UserService;
 import jakarta.annotation.Resource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.beans.BeanUtils;
 import reactor.core.publisher.Flux;
 
 import java.io.File;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -59,6 +64,14 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
 
     private static final int MAX_FEATURED_PAGE_SIZE = 20;
 
+    private static final String FEATURED_APP_CACHE_VER_KEY = "app:featured:ver";
+
+    private static final String FEATURED_APP_CACHE_KEY_PREFIX = "app:featured:page";
+
+    private static final long FEATURED_APP_CACHE_TTL_SECONDS = 60;
+
+    private static final long FEATURED_APP_CACHE_EMPTY_TTL_SECONDS = 10;
+
     private static final Set<String> USER_ALLOWED_SORT_FIELDS = Set.of("id", "appName", "priority", "createTime", "updateTime", "editTime");
 
     private static final Set<String> ADMIN_ALLOWED_SORT_FIELDS = Set.of(
@@ -75,6 +88,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     private StreamHandlerExecutor streamHandlerExecutor;
     @Autowired
     private VueProjectBuilder vueProjectBuilder;
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private ObjectMapper objectMapper;
 
     @Override
     public long createApp(AppCreateRequest appCreateRequest, jakarta.servlet.http.HttpServletRequest request) {
@@ -129,7 +146,11 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         updateApp.setId(id);
         updateApp.setAppName(appName);
         updateApp.setEditTime(LocalDateTime.now());
-        return this.updateById(updateApp);
+        boolean result = this.updateById(updateApp);
+        if (result && oldApp.getPriority() != null && oldApp.getPriority() > 0) {
+            invalidateFeaturedAppCache();
+        }
+        return result;
     }
 
     @Override
@@ -145,8 +166,11 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         
         // 级联删除对话历史
         chatHistoryService.deleteChatHistoryByAppId(id);
-        
-        return this.removeById(id);
+        boolean result = this.removeById(id);
+        if (result && oldApp.getPriority() != null && oldApp.getPriority() > 0) {
+            invalidateFeaturedAppCache();
+        }
+        return result;
     }
 
     @Override
@@ -196,8 +220,6 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
 
     @Override
     public Page<AppVO> pageFeaturedAppVo(AppFeaturedQueryRequest appFeaturedQueryRequest) {
-        QueryWrapper queryWrapper = buildFeaturedAppQueryWrapper(appFeaturedQueryRequest);
-
         long pageNumber = appFeaturedQueryRequest == null ? 1 : appFeaturedQueryRequest.getPageNumber();
         long pageSize = appFeaturedQueryRequest == null ? 10 : appFeaturedQueryRequest.getPageSize();
         if (pageNumber < 1) {
@@ -207,12 +229,29 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             throw new BusinessException(ErrorCode.PARAM_ERROR, "pageSize 错误");
         }
 
+        String cacheKey = buildFeaturedAppCacheKey(pageNumber, pageSize, appFeaturedQueryRequest == null ? null : appFeaturedQueryRequest.getAppName());
+        String cachedJson = stringRedisTemplate.opsForValue().get(cacheKey);
+        if (StrUtil.isNotBlank(cachedJson)) {
+            try {
+                return objectMapper.readValue(cachedJson, new TypeReference<Page<AppVO>>() {});
+            } catch (Exception e) {
+                log.warn("解析精选应用缓存失败，key={}, error={}", cacheKey, e.getMessage());
+            }
+        }
+
+        QueryWrapper queryWrapper = buildFeaturedAppQueryWrapper(appFeaturedQueryRequest);
         Page<App> appPage = this.mapper.paginate(pageNumber, pageSize, queryWrapper);
         List<AppVO> appVoRecords = getAppVoList(appPage.getRecords());
 
         Page<AppVO> appVoPage = new Page<>(appPage.getPageNumber(), appPage.getPageSize());
         appVoPage.setTotalRow(appPage.getTotalRow());
         appVoPage.setRecords(appVoRecords);
+        try {
+            long ttl = CollUtil.isEmpty(appVoRecords) ? FEATURED_APP_CACHE_EMPTY_TTL_SECONDS : FEATURED_APP_CACHE_TTL_SECONDS;
+            stringRedisTemplate.opsForValue().set(cacheKey, objectMapper.writeValueAsString(appVoPage), Duration.ofSeconds(ttl));
+        } catch (Exception e) {
+            log.warn("写入精选应用缓存失败，key={}, error={}", cacheKey, e.getMessage());
+        }
         return appVoPage;
     }
 
@@ -224,8 +263,11 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         
         // 级联删除对话历史
         chatHistoryService.deleteChatHistoryByAppId(id);
-        
-        return this.removeById(id);
+        boolean result = this.removeById(id);
+        if (result && oldApp.getPriority() != null && oldApp.getPriority() > 0) {
+            invalidateFeaturedAppCache();
+        }
+        return result;
     }
 
     @Override
@@ -249,7 +291,16 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             updateApp.setPriority(appAdminUpdateRequest.getPriority());
         }
         updateApp.setEditTime(LocalDateTime.now());
-        return this.updateById(updateApp);
+        boolean result = this.updateById(updateApp);
+        if (result) {
+            boolean oldFeatured = oldApp.getPriority() != null && oldApp.getPriority() > 0;
+            boolean newFeatured = appAdminUpdateRequest.getPriority() != null && appAdminUpdateRequest.getPriority() > 0;
+            boolean updateName = StrUtil.isNotBlank(appAdminUpdateRequest.getAppName());
+            if (oldFeatured || newFeatured || updateName) {
+                invalidateFeaturedAppCache();
+            }
+        }
+        return result;
     }
 
     @Override
@@ -398,6 +449,23 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
             queryWrapper.orderBy(sortField + (asc ? " asc" : " desc"));
         } else {
             queryWrapper.orderBy("id desc");
+        }
+    }
+
+    private String buildFeaturedAppCacheKey(long pageNumber, long pageSize, String appName) {
+        String ver = stringRedisTemplate.opsForValue().get(FEATURED_APP_CACHE_VER_KEY);
+        if (StrUtil.isBlank(ver)) {
+            ver = "0";
+        }
+        String namePart = StrUtil.isBlank(appName) ? "_" : DigestUtil.sha256Hex(appName.trim());
+        return FEATURED_APP_CACHE_KEY_PREFIX + ":v" + ver + ":" + pageNumber + ":" + pageSize + ":" + namePart;
+    }
+
+    private void invalidateFeaturedAppCache() {
+        try {
+            stringRedisTemplate.opsForValue().increment(FEATURED_APP_CACHE_VER_KEY);
+        } catch (Exception e) {
+            log.warn("失效精选应用缓存失败: {}", e.getMessage());
         }
     }
 

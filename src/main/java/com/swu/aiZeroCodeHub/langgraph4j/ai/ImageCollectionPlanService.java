@@ -1,24 +1,24 @@
-package com.swu.aiZeroCodeHub.aiService;
+package com.swu.aiZeroCodeHub.langgraph4j.ai;
 
+
+import com.swu.aiZeroCodeHub.langgraph4j.model.ImageCollectionPlan;
 import com.swu.aiZeroCodeHub.guardrail.PromptInjectionInputGuardrail;
 import com.swu.aiZeroCodeHub.guardrail.SensitiveInfoOutputGuardrail;
-import dev.langchain4j.service.MemoryId;
 import dev.langchain4j.service.SystemMessage;
-import dev.langchain4j.service.TokenStream;
 import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.guardrail.InputGuardrails;
 import dev.langchain4j.service.guardrail.OutputGuardrails;
 
 /**
- * Vue 项目修改服务
+ * 图片收集规划服务
  */
-public interface AiVueModifyService {
+public interface ImageCollectionPlanService {
 
-    @SystemMessage(fromResource = "prompt/codegen-vue-modify-system-prompt.txt")
+    /**
+     * 根据用户提示词分析需要收集的图片类型和参数
+     */
+    @SystemMessage(fromResource = "prompt/image-collection-plan-system-prompt.txt")
     @InputGuardrails(PromptInjectionInputGuardrail.class)
     @OutputGuardrails(SensitiveInfoOutputGuardrail.class)
-    TokenStream generateProjectCodeStream(
-            @MemoryId Long appId,
-            @UserMessage String userMessage
-    );
+    ImageCollectionPlan planImageCollection(@UserMessage String userPrompt);
 }

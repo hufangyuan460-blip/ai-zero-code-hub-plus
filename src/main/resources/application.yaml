@@ -71,3 +71,12 @@ cos:
     secretKey: ${TENCENT_CLOUD_SECRET_KEY}
     region: ap-chongqing
     bucket: ai-zero-code-hub-1403407939
+
+
+pexels:
+  api-key: DOK4Pg9nNTNbCOqF56LYwbNSMjE8IrqetoN9XhVJ1CFghNMoiZqUWAqp
+
+# 阿里云DashScope配置
+dashscope:
+  api-key: ${ALIYUN_API_KEY}
+  image-model: wan2.2-t2i-flash

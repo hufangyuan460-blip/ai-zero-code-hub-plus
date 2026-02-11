@@ -172,15 +172,6 @@ public class VueProjectBuilder {
      * @param projectPath Vue 工程项目根目录（包含 package.json）
      */
     public void buildProjectAsync(String projectPath) {
-        // 在单独的线程中执行构建，避免阻塞主流程
-        Thread.ofVirtual()
-                .name("vue-builder-" + System.currentTimeMillis())
-                .start(() -> {
-                    try {
-                        buildProject(projectPath);
-                    } catch (Exception e) {
-                        log.error("异步构建Vue项目时发生异常: {}", e.getMessage(), e);
-                    }
-                });
+        buildProject(projectPath);
     }
 }
