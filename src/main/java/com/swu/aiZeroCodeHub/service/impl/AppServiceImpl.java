@@ -511,8 +511,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         //参数校验
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用ID不能为空");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(message), ErrorCode.PARAM_ERROR, "用户提示词不能为空");
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(message.length() > ChatHistoryService.MAX_USER_MESSAGE_LENGTH,
-                ErrorCode.PARAM_ERROR, "用户消息不能超过" + ChatHistoryService.MAX_USER_MESSAGE_LENGTH + "个字符");
+        // 必须在保存用户历史、创建异步流和调用 LLM 之前完成校验。
+        ChatHistoryService.validateUserMessageLength(message);
         ThrowUtils.throwExceptionByConditionAndErrorCode(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
 
         //查询应用信息

@@ -51,10 +51,8 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用不存在");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(ChatHistoryMessageTypeEnum.getEnumByValue(messageType) == null, ErrorCode.PARAM_ERROR, "消息类型错误");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(content), ErrorCode.PARAM_ERROR, "消息内容不能为空");
-        if (ChatHistoryMessageTypeEnum.USER.getValue().equals(messageType)
-                && content.length() > MAX_USER_MESSAGE_LENGTH) {
-            throw new BusinessException(ErrorCode.PARAM_ERROR,
-                    "用户消息不能超过" + MAX_USER_MESSAGE_LENGTH + "个字符");
+        if (ChatHistoryMessageTypeEnum.USER.getValue().equals(messageType)) {
+            ChatHistoryService.validateUserMessageLength(content);
         }
         if (ChatHistoryMessageTypeEnum.AI.getValue().equals(messageType)
                 && content.length() > MAX_AI_HISTORY_LENGTH) {
