@@ -12,12 +12,13 @@ import com.mybatisflex.core.query.QueryWrapper;
 import com.mybatisflex.spring.service.impl.ServiceImpl;
 import com.swu.aiZeroCodeHub.constant.AppConstant;
 import com.swu.aiZeroCodeHub.constant.UserConstant;
-import com.swu.aiZeroCodeHub.core.AiCodeGeneratorFacade;
 import com.swu.aiZeroCodeHub.core.builder.VueProjectBuilder;
-import com.swu.aiZeroCodeHub.core.executor.StreamHandlerExecutor;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
+import com.swu.aiZeroCodeHub.generation.GenerationDispatcher;
+import com.swu.aiZeroCodeHub.generation.GenerationEvent;
+import com.swu.aiZeroCodeHub.generation.GenerationRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppAdminQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppAdminUpdateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppCreateRequest;
@@ -28,6 +29,7 @@ import com.swu.aiZeroCodeHub.model.entity.App;
 import com.swu.aiZeroCodeHub.mapper.AppMapper;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
+import com.swu.aiZeroCodeHub.model.enums.ExecutionModeEnum;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
 import com.swu.aiZeroCodeHub.service.AppService;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
@@ -84,12 +86,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     private UserService userService;
     @Resource
     private ChatHistoryService chatHistoryService;
-    @Autowired
-    private AiCodeGeneratorFacade aiCodeGeneratorFacade;
     @Resource
     private AiCodeGeneratorServiceFactory aiCodeGeneratorServiceFactory;
-    @Autowired
-    private StreamHandlerExecutor streamHandlerExecutor;
+    @Resource
+    private GenerationDispatcher generationDispatcher;
     @Autowired
     private VueProjectBuilder vueProjectBuilder;
     @Resource
@@ -500,23 +500,37 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
      */
     @Override
     public Flux<String> chatToGenCode(Long appId, String message, String codeGenType, User loginUser) {
+        return chatToGenCode(appId, message, codeGenType, null, loginUser)
+                .filter(event -> "message".equals(event.type()))
+                .map(event -> event.data() == null ? "" : String.valueOf(event.data()));
+    }
+
+    @Override
+    public Flux<GenerationEvent> chatToGenCode(Long appId, String message, String codeGenType,
+                                               String executionMode, User loginUser) {
         //参数校验
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用ID不能为空");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(message), ErrorCode.PARAM_ERROR, "用户提示词不能为空");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(message.length() > ChatHistoryService.MAX_USER_MESSAGE_LENGTH,
                 ErrorCode.PARAM_ERROR, "用户消息不能超过" + ChatHistoryService.MAX_USER_MESSAGE_LENGTH + "个字符");
+        ThrowUtils.throwExceptionByConditionAndErrorCode(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
 
         //查询应用信息
         App app = this.getById(appId);
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
-        if (!app.getUserId().equals(loginUser.getId())) {
+        if (app.getUserId() == null || !app.getUserId().equals(loginUser.getId())) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限访问该应用");
         }
+
+        ExecutionModeEnum mode = ExecutionModeEnum.parse(executionMode);
 
         //获取应用代码生成类型：优先使用参数传入的类型，如果为空则使用应用配置的类型
         String type = StrUtil.isNotBlank(codeGenType) ? codeGenType : app.getCodeGenType();
         CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(type);
-        if (codeGenTypeEnum == null) {
+        if (StrUtil.isNotBlank(type) && codeGenTypeEnum == null) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR, "codeGenType 错误");
+        }
+        if (codeGenTypeEnum == null && mode == ExecutionModeEnum.DIRECT) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "不支持的代码生成类型");
         }
         if (StrUtil.isNotBlank(codeGenType) && !codeGenType.equals(app.getCodeGenType())) {
@@ -531,11 +545,17 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         // 1. 保存用户消息
         saveChatHistory(appId, message, ChatHistoryMessageTypeEnum.USER, loginUser);
 
-        // 2. 调用AI生成，并捕获响应流
-        Flux<String> fluxResponse = aiCodeGeneratorFacade.generateAndSaveCodeStream(message, codeGenTypeEnum, appId);
-
-        //3. 调用流处理执行器处理流
-        return streamHandlerExecutor.doExecute(fluxResponse,chatHistoryService,appId,loginUser,codeGenTypeEnum);
+        // 2. 构造已完成鉴权和参数校验的请求，再统一分发执行策略。
+        GenerationRequest generationRequest = new GenerationRequest(
+                appId,
+                loginUser.getId(),
+                message,
+                codeGenTypeEnum,
+                mode,
+                loginUser,
+                null
+        );
+        return generationDispatcher.generate(generationRequest);
     }
 
 

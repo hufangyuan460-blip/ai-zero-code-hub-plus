@@ -13,6 +13,7 @@ import com.swu.aiZeroCodeHub.core.ratelimit.RateLimitException;
 import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
+import com.swu.aiZeroCodeHub.generation.GenerationEvent;
 import com.swu.aiZeroCodeHub.model.dto.app.AppAdminQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppAdminUpdateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppCreateRequest;
@@ -188,20 +189,55 @@ public class AppController {
     public Flux<ServerSentEvent<String>> chatGenerateCode(@RequestParam("appId") Long appId,
                                                           @RequestParam("userMessage") String userMessage,
                                                           @RequestParam(value = "codeGenType", required = false) String codeGenType,
+                                                          @RequestParam(value = "executionMode", required = false) String executionMode,
                                                           HttpServletRequest request) {
-        User loginUser = userService.getLoginUser(request);
-        String rateKey = "rate:sse:chat:gen:code:user:" + loginUser.getId();
-        boolean acquired = distributedRateLimiter.tryAcquire(rateKey, CHAT_GENERATE_CODE_RATE, CHAT_GENERATE_CODE_INTERVAL_SECONDS);
-        if (!acquired) {
-            return sseError(new RateLimitException("请求过于频繁，请稍后再试", CHAT_GENERATE_CODE_INTERVAL_SECONDS));
+        try {
+            User loginUser = userService.getLoginUser(request);
+            String rateKey = "rate:sse:chat:gen:code:user:" + loginUser.getId();
+            boolean acquired = distributedRateLimiter.tryAcquire(rateKey, CHAT_GENERATE_CODE_RATE, CHAT_GENERATE_CODE_INTERVAL_SECONDS);
+            if (!acquired) {
+                return sseError(new RateLimitException("请求过于频繁，请稍后再试", CHAT_GENERATE_CODE_INTERVAL_SECONDS));
+            }
+            Flux<GenerationEvent> eventFlux = appService.chatToGenCode(
+                    appId, userMessage, codeGenType, executionMode, loginUser);
+            Flux<ServerSentEvent<String>> stream = eventFlux.map(this::toSseEvent);
+            ServerSentEvent<String> done = ServerSentEvent.builder("").event("done").build();
+            return stream.concatWith(Mono.just(done))
+                    .onErrorResume(this::sseError);
+        } catch (Throwable throwable) {
+            return sseError(throwable);
         }
-        Flux<String> flux = appService.chatToGenCode(appId, userMessage, codeGenType, loginUser);
-        Flux<ServerSentEvent<String>> stream = flux.map(chunk ->
-                ServerSentEvent.builder(chunk).build()
-        );
-        ServerSentEvent<String> done = ServerSentEvent.builder("").event("done").build();
-        return stream.concatWith(Mono.just(done))
-                .onErrorResume(this::sseError);
+    }
+
+    /**
+     * 兼容旧的 Java 调用方；HTTP 请求统一使用带 executionMode 的映射方法。
+     */
+    public Flux<ServerSentEvent<String>> chatGenerateCode(Long appId,
+                                                          String userMessage,
+                                                          String codeGenType,
+                                                          HttpServletRequest request) {
+        return chatGenerateCode(appId, userMessage, codeGenType, null, request);
+    }
+
+    /**
+     * SSE 序列化的唯一入口。业务层和工作流不拼接 event/data 文本。
+     */
+    private ServerSentEvent<String> toSseEvent(GenerationEvent event) {
+        String data = event.data() instanceof String stringData
+                ? stringData
+                : serializeEventData(event.data());
+        return ServerSentEvent.builder(data).event(event.type()).build();
+    }
+
+    private String serializeEventData(Object data) {
+        if (data == null) {
+            return "";
+        }
+        try {
+            return objectMapper.writeValueAsString(data);
+        } catch (Exception e) {
+            return "{\"message\":\"事件数据序列化失败\"}";
+        }
     }
 
     private Flux<ServerSentEvent<String>> sseError(Throwable throwable) {
@@ -224,11 +260,11 @@ public class AppController {
         }
         String json;
         try {
-            json = objectMapper.writeValueAsString(Map.of(
-                    "code", code,
-                    "message", message,
-                    "page", page
-            ));
+            Map<String, Object> errorData = new java.util.LinkedHashMap<>();
+            errorData.put("code", code);
+            errorData.put("message", message);
+            errorData.put("page", page);
+            json = objectMapper.writeValueAsString(errorData);
         } catch (Exception e) {
             json = "{\"code\":" + code + ",\"message\":\"" + message + "\"}";
         }

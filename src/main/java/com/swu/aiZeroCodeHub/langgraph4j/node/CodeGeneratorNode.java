@@ -2,92 +2,109 @@ package com.swu.aiZeroCodeHub.langgraph4j.node;
 
 import com.swu.aiZeroCodeHub.constant.AppConstant;
 import com.swu.aiZeroCodeHub.core.AiCodeGeneratorFacade;
+import com.swu.aiZeroCodeHub.core.streamHandler.HistoryContentAccumulator;
+import com.swu.aiZeroCodeHub.core.streamHandler.HistoryContentSanitizer;
+import com.swu.aiZeroCodeHub.generation.GenerationEvent;
+import com.swu.aiZeroCodeHub.langgraph4j.WorkflowEventSupport;
 import com.swu.aiZeroCodeHub.langgraph4j.model.QualityResult;
 import com.swu.aiZeroCodeHub.langgraph4j.state.WorkflowContext;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
-import com.swu.aiZeroCodeHub.utils.SpringContextUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.AsyncNodeAction;
 import org.bsc.langgraph4j.prebuilt.MessagesState;
+import com.swu.aiZeroCodeHub.utils.SpringContextUtil;
 import reactor.core.publisher.Flux;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 
 import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 
 /**
- * 网站代码生成节点
+ * 网站代码生成节点。
  */
 @Slf4j
 public class CodeGeneratorNode {
 
+    /**
+     * 兼容旧的示例工作流；正式入口使用带依赖参数的工厂方法。
+     */
     public static AsyncNodeAction<MessagesState<String>> create() {
+        return create(SpringContextUtil.getBean(AiCodeGeneratorFacade.class));
+    }
+
+    public static AsyncNodeAction<MessagesState<String>> create(AiCodeGeneratorFacade codeGeneratorFacade) {
         return node_async(state -> {
             WorkflowContext context = WorkflowContext.getContext(state);
-            log.info("执行节点: 代码生成");
-            // 构造用户消息（包含原始提示词和可能的错误修复信息）
+            WorkflowEventSupport.stepStarted(context, "生成代码");
+            log.info("执行节点: 代码生成，appId={}, requestId={}", context.getAppId(), context.getRequestId());
+
             String userMessage = buildUserMessage(context);
             CodeGenTypeEnum generationType = context.getGenerationType();
-            // 获取 AI 代码生成外观服务
-            AiCodeGeneratorFacade codeGeneratorFacade = SpringContextUtil.getBean(AiCodeGeneratorFacade.class);
-            log.info("开始生成代码，类型: {} ({})", generationType.getValue(), generationType.getText());
-            // 先使用固定的 appId (后续再整合到业务中)
-            Long appId = 0L;
-            // 调用流式代码生成
-            Flux<String> codeStream = codeGeneratorFacade.generateAndSaveCodeStream(userMessage, generationType, appId);
-            // 同步等待流式输出完成
-            codeStream.blockLast(Duration.ofMinutes(10)); // 最多等待 10 分钟
-            // 根据类型设置生成目录
-            String generatedCodeDir = String.format("%s/%s_%s", AppConstant.CODE_OUTPUT_ROOT_DIR, generationType.getValue(), appId);
-            log.info("AI 代码生成完成，生成目录: {}", generatedCodeDir);
+            Long appId = context.getAppId();
+            if (appId == null || appId <= 0) {
+                throw new IllegalArgumentException("工作流 appId 无效");
+            }
 
-            // 更新状态
-            context.setCurrentStep("代码生成");
+            HistoryContentAccumulator historyAccumulator = new HistoryContentAccumulator();
+            Flux<String> codeStream = codeGeneratorFacade.generateAndSaveCodeStream(
+                    userMessage, generationType, appId);
+            codeStream.doOnNext(chunk -> {
+                        // 工作流只通过结构化 message 事件向外输出，Controller 负责 SSE 包装。
+                        context.publishEvent(GenerationEvent.message(chunk));
+                        historyAccumulator.append(HistoryContentSanitizer.sanitize(chunk, generationType));
+                    })
+                    .blockLast(Duration.ofMinutes(10));
+
+            String generatedCodeDir = buildCodeDirectory(generationType, appId);
+            context.setCurrentStep("生成代码");
             context.setGeneratedCodeDir(generatedCodeDir);
+            context.setAiHistoryContent(historyAccumulator.content());
+            WorkflowEventSupport.stepCompleted(context, "生成代码", "完成");
+            log.info("AI 代码生成完成，appId={}, 目录={}", appId, generatedCodeDir);
             return WorkflowContext.saveContext(context);
         });
     }
 
+    private static String buildCodeDirectory(CodeGenTypeEnum generationType, Long appId) {
+        Path path = Paths.get(AppConstant.CODE_OUTPUT_ROOT_DIR,
+                generationType.getValue() + "_" + appId).toAbsolutePath().normalize();
+        return path.toString();
+    }
+
     /**
-     * 构造用户消息，如果存在质检失败结果则添加错误修复信息
+     * 构造用户消息。如果是质检重试，只附加本轮质检结果，避免错误信息无限累积。
      */
     private static String buildUserMessage(WorkflowContext context) {
         String userMessage = context.getEnhancedPrompt();
-        // 检查是否存在质检失败结果
+        if (userMessage == null || userMessage.isBlank()) {
+            userMessage = context.getOriginalPrompt();
+        }
         QualityResult qualityResult = context.getQualityResult();
         if (isQualityCheckFailed(qualityResult)) {
-            // 直接将错误修复信息作为新的提示词（起到了修改的作用）
-            userMessage = buildErrorFixPrompt(qualityResult);
+            userMessage = userMessage + buildErrorFixPrompt(qualityResult);
         }
         return userMessage;
     }
 
-    /**
-     * 判断质检是否失败
-     */
     private static boolean isQualityCheckFailed(QualityResult qualityResult) {
-        return qualityResult != null &&
-                !qualityResult.getIsValid() &&
-                qualityResult.getErrors() != null &&
-                !qualityResult.getErrors().isEmpty();
+        return qualityResult != null
+                && Boolean.FALSE.equals(qualityResult.getIsValid())
+                && qualityResult.getErrors() != null
+                && !qualityResult.getErrors().isEmpty();
     }
 
-    /**
-     * 构造错误修复提示词
-     */
     private static String buildErrorFixPrompt(QualityResult qualityResult) {
-        StringBuilder errorInfo = new StringBuilder();
-        errorInfo.append("\n\n## 上次生成的代码存在以下问题，请修复：\n");
-        // 添加错误列表
-        qualityResult.getErrors().forEach(error ->
-                errorInfo.append("- ").append(error).append("\n"));
-        // 添加修复建议（如果有）
+        StringBuilder errorInfo = new StringBuilder("\n\n## 上次生成的代码存在以下问题，请修复：\n");
+        qualityResult.getErrors().stream().limit(20)
+                .forEach(error -> errorInfo.append("- ").append(error).append("\n"));
         if (qualityResult.getSuggestions() != null && !qualityResult.getSuggestions().isEmpty()) {
             errorInfo.append("\n## 修复建议：\n");
-            qualityResult.getSuggestions().forEach(suggestion ->
-                    errorInfo.append("- ").append(suggestion).append("\n"));
+            qualityResult.getSuggestions().stream().limit(20)
+                    .forEach(suggestion -> errorInfo.append("- ").append(suggestion).append("\n"));
         }
-        errorInfo.append("\n请根据上述问题和建议重新生成代码，确保修复所有提到的问题。");
-        return errorInfo.toString();
+        return errorInfo.append("\n请根据上述问题和建议重新生成代码，确保修复所有提到的问题。")
+                .toString();
     }
 }

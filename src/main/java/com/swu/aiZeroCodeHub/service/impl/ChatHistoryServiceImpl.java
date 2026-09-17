@@ -194,6 +194,9 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
     @Override
     public int loadChatHistoryToMemory(Long appId, MessageWindowChatMemory chatMemory, int maxCount) {
         try {
+            // 重建服务时以 MySQL 为准，先清除该 appId 的 Redis 记忆，避免数据库查询失败时继续复用旧内容。
+            chatMemory.clear();
+
             // 直接构造查询条件，起始点为1而不是0，用于排除最新的用户消息
             int memoryMessageCount = Math.min(Math.max(maxCount, 0), MAX_MEMORY_MESSAGES);
             QueryWrapper queryWrapper = QueryWrapper.create()
@@ -201,9 +204,6 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
                     .orderBy(ChatHistory::getCreateTime, false)
                     .limit(1, memoryMessageCount);
             List<ChatHistory> historyList = this.list(queryWrapper);
-
-            // 重建服务时以 MySQL 为准，先清除该 appId 的 Redis 记忆，避免复用过期内容。
-            chatMemory.clear();
 
             if (CollUtil.isEmpty(historyList)) {
                 return 0;

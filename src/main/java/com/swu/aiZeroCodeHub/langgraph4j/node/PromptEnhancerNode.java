@@ -3,6 +3,7 @@ package com.swu.aiZeroCodeHub.langgraph4j.node;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import com.swu.aiZeroCodeHub.langgraph4j.model.ImageResource;
+import com.swu.aiZeroCodeHub.langgraph4j.WorkflowEventSupport;
 import com.swu.aiZeroCodeHub.langgraph4j.state.WorkflowContext;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.AsyncNodeAction;
@@ -22,6 +23,7 @@ public class PromptEnhancerNode {
         return node_async(state -> {
             WorkflowContext context = WorkflowContext.getContext(state);
             log.info("执行节点: 提示词增强");
+            WorkflowEventSupport.stepStarted(context, "提示词增强");
             // 获取原始提示词和图片列表
             String originalPrompt = context.getOriginalPrompt();
             String imageListStr = context.getImageListStr();
@@ -51,6 +53,7 @@ public class PromptEnhancerNode {
             // 更新状态
             context.setCurrentStep("提示词增强");
             context.setEnhancedPrompt(enhancedPrompt);
+            WorkflowEventSupport.stepCompleted(context, "提示词增强", "完成");
             log.info("提示词增强完成，增强后长度: {} 字符", enhancedPrompt.length());
             return WorkflowContext.saveContext(context);
         });

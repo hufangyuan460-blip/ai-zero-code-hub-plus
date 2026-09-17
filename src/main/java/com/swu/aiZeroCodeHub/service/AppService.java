@@ -11,6 +11,7 @@ import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
 import com.swu.aiZeroCodeHub.model.entity.App;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
+import com.swu.aiZeroCodeHub.generation.GenerationEvent;
 import jakarta.servlet.http.HttpServletRequest;
 import reactor.core.publisher.Flux;
 
@@ -50,6 +51,14 @@ public interface AppService extends IService<App> {
      * @return
      */
     Flux<String> chatToGenCode(Long appId, String message, String codeGenType, User loginUser);
+
+    /**
+     * 按本次请求指定的执行模式生成代码。
+     *
+     * @param executionMode DIRECT 或 WORKFLOW，可为空（兼容旧客户端）
+     */
+    Flux<GenerationEvent> chatToGenCode(Long appId, String message, String codeGenType,
+                                        String executionMode, User loginUser);
 
     /**
      * 部署AI生成的网页代码

@@ -56,9 +56,24 @@ interface Message {
   content: string
   loading?: boolean
 }
+type ExecutionMode = 'DIRECT' | 'WORKFLOW'
+interface WorkflowStep {
+  name: string
+  status: string
+}
 const messages = ref<Message[]>([])
 const inputPrompt = ref('')
 const chatContainer = ref<HTMLElement>()
+const executionMode = ref<ExecutionMode>('DIRECT')
+const lastExecutionMode = ref<ExecutionMode>('DIRECT')
+const workflowSteps = ref<WorkflowStep[]>([])
+const workflowFailed = ref(false)
+const workflowError = ref('')
+const lastFailedPrompt = ref('')
+const isGenerating = computed(() => messages.value.some(message => message.loading))
+const executionModeDescription = computed(() => executionMode.value === 'WORKFLOW'
+  ? '会执行规划、资源收集、质检和构建，耗时较长。'
+  : '速度快，适合小修改和连续对话。')
 
 // History Pagination
 const hasMore = ref(false)
@@ -198,7 +213,7 @@ const resetDeployTimeout = () => {
   if (deployTimeoutTimer) {
     clearTimeout(deployTimeoutTimer);
   }
-  if (codeGenType.value === 'vue_project') {
+  if (codeGenType.value === 'vue_project' || lastExecutionMode.value === 'WORKFLOW') {
     return
   }
   // 如果 60 秒没有收到新消息，强制结束并部署
@@ -272,11 +287,90 @@ const forceDeploy = async () => {
 const eventSourceRef = ref<EventSource | null>(null);
 const aiMsgIndexRef = ref<number>(0);
 
-const onGenerate = async (prompt: string) => {
-  if (!app.value || !prompt) return
+const appendToAiMessage = (index: number, content: string) => {
+  if (content && messages.value[index]) {
+    messages.value[index]!.content += content
+  }
+}
+
+const parseEventData = (eventData: string): unknown => {
+  try {
+    return JSON.parse(eventData)
+  } catch {
+    return eventData
+  }
+}
+
+const appendGenerationMessage = (eventData: string, messageIndex: number) => {
+  const data = parseEventData(eventData)
+  if (typeof data !== 'object' || data === null) {
+    appendToAiMessage(messageIndex, String(data))
+    return
+  }
+
+  const typedData = data as Record<string, unknown>
+  if (typedData.type === 'ai_response' && typeof typedData.data === 'string') {
+    appendToAiMessage(messageIndex, typedData.data)
+    return
+  }
+  if (typedData.type === 'tool_request') {
+    const toolName = typeof typedData.name === 'string' ? typedData.name : '工具'
+    appendToAiMessage(messageIndex, `\n\n[选择工具] ${toolName}\n\n`)
+    return
+  }
+  if (typedData.type === 'tool_executed') {
+    let path = ''
+    try {
+      const args = JSON.parse(typeof typedData.arguments === 'string' ? typedData.arguments : '{}') as Record<string, unknown>
+      path = typeof args.relativeFilePath === 'string'
+        ? args.relativeFilePath
+        : typeof args.relativeDirPath === 'string' ? args.relativeDirPath : ''
+    } catch {
+      // 工具参数只用于内部处理，不直接展示给用户。
+    }
+    const toolName = typeof typedData.name === 'string' ? typedData.name : '工具'
+    const actionMap: Record<string, string> = {
+      writeFile: '写入文件',
+      modifyFile: '修改文件',
+      readFile: '读取文件',
+      deleteFile: '删除文件',
+      getProjectFileTree: '获取目录结构',
+    }
+    appendToAiMessage(messageIndex, `\n\n[工具调用] ${actionMap[toolName] || toolName}${path ? `：${path}` : ''}\n\n`)
+    return
+  }
+  if (typeof typedData.content === 'string') {
+    appendToAiMessage(messageIndex, typedData.content)
+    return
+  }
+  appendToAiMessage(messageIndex, JSON.stringify(data))
+}
+
+const handleWorkflowStep = (eventData: string) => {
+  const data = parseEventData(eventData)
+  if (typeof data !== 'object' || data === null) return
+  const stepData = data as Record<string, unknown>
+  if (typeof stepData.step !== 'string') return
+  const status = typeof stepData.status === 'string' ? stepData.status : '进行中'
+  const existing = workflowSteps.value.find(step => step.name === stepData.step)
+  if (existing) {
+    existing.status = status
+  } else {
+    workflowSteps.value.push({ name: stepData.step, status })
+  }
+}
+
+const onGenerate = async (prompt: string, requestedMode: ExecutionMode = executionMode.value) => {
+  if (!app.value || !prompt || isGenerating.value || deploying.value) return
 
   deployFailed.value = false
   deployError.value = ''
+  workflowFailed.value = false
+  workflowError.value = ''
+  lastExecutionMode.value = requestedMode
+  if (requestedMode === 'WORKFLOW') {
+    workflowSteps.value = []
+  }
 
   // Add User Message
   messages.value.push({ role: 'user', content: prompt })
@@ -291,11 +385,12 @@ const onGenerate = async (prompt: string) => {
   // Start SSE
   // Note: EventSource does not support custom headers, but supports cookies via withCredentials
   const type = codeGenType.value
+  const mode = requestedMode
   // Fix garbled characters: use encodeURIComponent for userMessage
   // And ensure backend handles encoding correctly (it usually does with URL parameters)
   // Double check if backend requires specific charset in content-type, but GET query params are standard.
   const eventSource = new EventSource(
-    `/api/app/chat/gen/code?appId=${appId}&userMessage=${encodeURIComponent(prompt)}&codeGenType=${type}`,
+    `/api/app/chat/gen/code?appId=${appId}&userMessage=${encodeURIComponent(prompt)}&codeGenType=${type}&executionMode=${mode}`,
     { withCredentials: true }
   )
   eventSourceRef.value = eventSource;
@@ -303,60 +398,68 @@ const onGenerate = async (prompt: string) => {
   // 启动超时计时器
   resetDeployTimeout();
 
-  eventSource.onmessage = (event) => {
+  const handleMessageEvent = (event: MessageEvent) => {
     // 收到任意消息都重置超时计时器
     resetDeployTimeout();
 
     try {
-      let data;
-      try {
-          data = JSON.parse(event.data);
-      } catch {
-          data = event.data;
-      }
-
-      if (typeof data === 'object' && data !== null) {
-          if (data.type) {
-             if (data.type === 'ai_response' && typeof data.data === 'string') {
-               messages.value[aiMsgIndex]!.content += data.data
-             } else if (data.type === 'tool_request') {
-               messages.value[aiMsgIndex]!.content += '\n\n[选择工具] 写入文件\n\n'
-             } else if (data.type === 'tool_executed') {
-               try {
-                 const args = JSON.parse(data.arguments || '{}')
-                 const filePath = args.relativeFilePath || ''
-                 const content = args.content || ''
-                 const suffix = (filePath.split('.').pop() || '')
-                 const block = `\n\n[工具调用] 写入文件 ${filePath}\n\`\`\`${suffix}\n${content}\n\`\`\`\n\n`
-                 messages.value[aiMsgIndex]!.content += block
-               } catch {
-                 messages.value[aiMsgIndex]!.content += JSON.stringify(data)
-               }
-             } else {
-               messages.value[aiMsgIndex]!.content += JSON.stringify(data)
-             }
-          } else if (data.content) {
-             messages.value[aiMsgIndex]!.content += data.content
-          } else {
-             messages.value[aiMsgIndex]!.content += JSON.stringify(data)
-          }
-      } else {
-         messages.value[aiMsgIndex]!.content += data
-      }
-
+      appendGenerationMessage(event.data, aiMsgIndex)
     } catch (e) {
       console.error("Error processing SSE message:", e);
-      messages.value[aiMsgIndex]!.content += event.data
+      appendToAiMessage(aiMsgIndex, event.data)
     }
     scrollToBottom()
   }
+  eventSource.addEventListener('message', handleMessageEvent)
+
+  eventSource.addEventListener('workflow_start', (event) => {
+    workflowFailed.value = false
+    workflowError.value = ''
+    workflowSteps.value = []
+    const data = parseEventData((event as MessageEvent).data)
+    if (typeof data === 'object' && data !== null && typeof (data as Record<string, unknown>).message === 'string') {
+      workflowSteps.value.push({ name: '增强工作流', status: (data as Record<string, unknown>).message as string })
+    }
+  })
+
+  eventSource.addEventListener('step_started', (event) => {
+    handleWorkflowStep((event as MessageEvent).data)
+  })
+
+  eventSource.addEventListener('step_completed', (event) => {
+    handleWorkflowStep((event as MessageEvent).data)
+  })
+
+  eventSource.addEventListener('workflow_completed', () => {
+    handleWorkflowStep(JSON.stringify({ step: '增强工作流', status: '完成' }))
+    resetDeployTimeout()
+  })
+
+  eventSource.addEventListener('error', (event) => {
+    const messageEvent = event as MessageEvent
+    const data = parseEventData(messageEvent.data || '')
+    let errorMessage = '生成失败，请稍后重试'
+    if (typeof data === 'object' && data !== null && typeof (data as Record<string, unknown>).message === 'string') {
+      errorMessage = (data as Record<string, unknown>).message as string
+    } else if (typeof data === 'string' && data) {
+      errorMessage = data
+    }
+    workflowFailed.value = true
+    workflowError.value = errorMessage
+    lastFailedPrompt.value = prompt
+    if (messages.value[aiMsgIndex]?.loading) {
+      messages.value[aiMsgIndex]!.loading = false
+    }
+    appendToAiMessage(aiMsgIndex, `\n[生成失败：${errorMessage}]`)
+    scrollToBottom()
+  })
 
   eventSource.addEventListener('done', async () => {
     if (deployTimeoutTimer) clearTimeout(deployTimeoutTimer);
     messages.value[aiMsgIndex]!.loading = false
     eventSource.close()
 
-    if (app.value) {
+    if (app.value && !workflowFailed.value) {
       const loadingMsg = codeGenType.value === 'vue_project'
         ? '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
         : '生成完毕，正在自动部署中...'
@@ -372,7 +475,12 @@ const onGenerate = async (prompt: string) => {
     eventSource.close()
     if (messages.value[aiMsgIndex]!.loading) {
         messages.value[aiMsgIndex]!.loading = false
-        messages.value[aiMsgIndex]!.content += '\n[生成出错或连接中断]'
+        if (!workflowFailed.value) {
+          messages.value[aiMsgIndex]!.content += '\n[生成出错或连接中断]'
+          workflowFailed.value = true
+          workflowError.value = '生成出错或连接中断'
+          lastFailedPrompt.value = prompt
+        }
     }
     // 出错也尝试刷新历史记录，捕获后端已保存的错误信息
     loadHistory(false)
@@ -380,6 +488,12 @@ const onGenerate = async (prompt: string) => {
     // 连接中断时不强制部署，避免部署不完整的代码
     // 只有在超时的情况下（上面的 setTimeout）才尝试强制部署
   }
+}
+
+const retryWithDirectMode = () => {
+  if (!lastFailedPrompt.value || isGenerating.value) return
+  executionMode.value = 'DIRECT'
+  onGenerate(lastFailedPrompt.value, 'DIRECT')
 }
 
 const refreshPreview = () => {
@@ -591,6 +705,17 @@ const onIframeLoad = () => {
                   </template>
               </a-alert>
           </div>
+          <div v-if="lastExecutionMode === 'WORKFLOW' && (workflowSteps.length > 0 || workflowFailed)" class="workflow-status-card">
+            <div class="workflow-status-title">增强工作流</div>
+            <div v-for="step in workflowSteps" :key="step.name" class="workflow-step">
+              <span>{{ step.name }}</span>
+              <span :class="{ 'workflow-step-failed': step.status.includes('失败') }">{{ step.status }}</span>
+            </div>
+            <div v-if="workflowFailed" class="workflow-error-message">
+              {{ workflowError || '工作流执行失败' }}
+              <a-button type="link" size="small" @click="retryWithDirectMode">以快速生成重试</a-button>
+            </div>
+          </div>
           <div class="input-controls">
             <a-button
                 :type="isEditMode ? 'primary' : 'default'"
@@ -601,13 +726,24 @@ const onIframeLoad = () => {
             >
                 <template #icon><FormOutlined /></template>
             </a-button>
+            <a-select
+                v-model:value="executionMode"
+                :disabled="isGenerating || deploying"
+                style="width: 152px"
+                :title="executionModeDescription"
+            >
+                <a-select-option value="DIRECT">快速生成（DIRECT）</a-select-option>
+                <a-select-option value="WORKFLOW">增强工作流（WORKFLOW）</a-select-option>
+            </a-select>
+            <span class="execution-mode-description">{{ executionModeDescription }}</span>
             <a-textarea
                 v-model:value="inputPrompt"
                 placeholder="描述越详细，页面越具体，可以一步一步完善生成效果..."
                 :auto-size="{ minRows: 2, maxRows: 6 }"
+                :disabled="isGenerating || deploying"
                 @pressEnter.prevent="onSendMessage"
             />
-            <a-button type="primary" shape="circle" @click="onSendMessage" style="margin-left: 8px">
+            <a-button type="primary" shape="circle" :disabled="isGenerating || deploying" @click="onSendMessage" style="margin-left: 8px">
                 <template #icon><SendOutlined /></template>
             </a-button>
           </div>
@@ -693,6 +829,34 @@ const onIframeLoad = () => {
     max-width: 360px;
     white-space: normal;
 }
+.workflow-status-card {
+    width: 100%;
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border: 1px solid #d9e8ff;
+    border-radius: 6px;
+    background: #f5f9ff;
+    color: #44546a;
+    font-size: 12px;
+}
+.workflow-status-title {
+    margin-bottom: 6px;
+    color: #1677ff;
+    font-weight: 600;
+}
+.workflow-step {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    line-height: 22px;
+}
+.workflow-step-failed,
+.workflow-error-message {
+    color: #ff4d4f;
+}
+.workflow-error-message {
+    margin-top: 5px;
+}
 .app-name {
     font-size: 18px;
     font-weight: 500;
@@ -763,6 +927,13 @@ const onIframeLoad = () => {
   display: flex;
   align-items: flex-end;
   width: 100%;
+}
+.execution-mode-description {
+  width: 130px;
+  margin: 0 8px;
+  color: #8c8c8c;
+  font-size: 12px;
+  line-height: 18px;
 }
 .preview-area {
   flex: 1;

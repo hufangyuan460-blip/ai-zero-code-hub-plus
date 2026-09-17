@@ -3,7 +3,9 @@ package com.swu.aiZeroCodeHub.langgraph4j.state;
 import com.swu.aiZeroCodeHub.langgraph4j.model.ImageCollectionPlan;
 import com.swu.aiZeroCodeHub.langgraph4j.model.ImageResource;
 import com.swu.aiZeroCodeHub.langgraph4j.model.QualityResult;
+import com.swu.aiZeroCodeHub.generation.GenerationEvent;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
+import com.swu.aiZeroCodeHub.model.enums.ExecutionModeEnum;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -14,6 +16,7 @@ import java.io.Serial;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * 工作流上下文 - 存储所有状态信息
@@ -33,6 +36,23 @@ public class WorkflowContext implements Serializable {
      * 当前执行步骤
      */
     private String currentStep;
+
+    /**
+     * 已经完成鉴权的应用和用户标识，所有工作流资源都必须使用该 appId。
+     */
+    private Long appId;
+    private Long userId;
+
+    /**
+     * 本次请求的执行参数。
+     */
+    private CodeGenTypeEnum generationType;
+    private ExecutionModeEnum executionMode;
+    @Builder.Default
+    private Integer repairAttempt = 0;
+    @Builder.Default
+    private Integer maxRepairAttempts = 2;
+    private String requestId;
 
     /**
      * 用户原始输入的提示词
@@ -55,11 +75,6 @@ public class WorkflowContext implements Serializable {
     private String enhancedPrompt;
 
     /**
-     * 代码生成类型
-     */
-    private CodeGenTypeEnum generationType;
-
-    /**
      * 生成的代码目录
      */
     private String generatedCodeDir;
@@ -78,6 +93,16 @@ public class WorkflowContext implements Serializable {
      * 错误信息
      */
     private String errorMessage;
+
+    /**
+     * 最终写入聊天历史的安全摘要。工具参数和完整源码不会进入该字段。
+     */
+    private String aiHistoryContent;
+
+    /**
+     * 仅用于本次执行期间向 Flux 发布结构化事件，不参与工作流持久化。
+     */
+    private transient Consumer<GenerationEvent> eventPublisher;
 
     /**
      * 图片收集计划
@@ -109,5 +134,11 @@ public class WorkflowContext implements Serializable {
      */
     public static Map<String, Object> saveContext(WorkflowContext context) {
         return Map.of(WORKFLOW_CONTEXT_KEY, context);
+    }
+
+    public void publishEvent(GenerationEvent event) {
+        if (eventPublisher != null && event != null) {
+            eventPublisher.accept(event);
+        }
     }
 }
