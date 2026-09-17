@@ -32,6 +32,8 @@ import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
 import com.swu.aiZeroCodeHub.service.AppService;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import com.swu.aiZeroCodeHub.service.UserService;
+import com.swu.aiZeroCodeHub.config.AiCodeGeneratorServiceFactory;
+import dev.langchain4j.community.store.memory.chat.redis.RedisChatMemoryStore;
 import jakarta.annotation.Resource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -84,6 +86,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     private ChatHistoryService chatHistoryService;
     @Autowired
     private AiCodeGeneratorFacade aiCodeGeneratorFacade;
+    @Resource
+    private AiCodeGeneratorServiceFactory aiCodeGeneratorServiceFactory;
     @Autowired
     private StreamHandlerExecutor streamHandlerExecutor;
     @Autowired
@@ -92,6 +96,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     private StringRedisTemplate stringRedisTemplate;
     @Resource
     private ObjectMapper objectMapper;
+    @Resource
+    private RedisChatMemoryStore redisChatMemoryStore;
 
     @Override
     public long createApp(AppCreateRequest appCreateRequest, jakarta.servlet.http.HttpServletRequest request) {
@@ -167,6 +173,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         // 级联删除对话历史
         chatHistoryService.deleteChatHistoryByAppId(id);
         boolean result = this.removeById(id);
+        if (result) {
+            clearAppChatMemory(id);
+        }
         if (result && oldApp.getPriority() != null && oldApp.getPriority() > 0) {
             invalidateFeaturedAppCache();
         }
@@ -264,6 +273,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         // 级联删除对话历史
         chatHistoryService.deleteChatHistoryByAppId(id);
         boolean result = this.removeById(id);
+        if (result) {
+            clearAppChatMemory(id);
+        }
         if (result && oldApp.getPriority() != null && oldApp.getPriority() > 0) {
             invalidateFeaturedAppCache();
         }
@@ -469,6 +481,16 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         }
     }
 
+    private void clearAppChatMemory(long appId) {
+        try {
+            // RedisChatMemoryStore.deleteMessages 使用精确 memoryId 删除，不影响其他应用。
+            redisChatMemoryStore.deleteMessages(appId);
+        } catch (Exception e) {
+            log.warn("清理应用 Redis 对话记忆失败，appId={}: {}", appId, e.getMessage());
+        }
+        aiCodeGeneratorServiceFactory.invalidateAppCache(appId);
+    }
+
     /**
      * 调用AI核心业务生产代码
      * @param appId
@@ -481,6 +503,8 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         //参数校验
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用ID不能为空");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(message), ErrorCode.PARAM_ERROR, "用户提示词不能为空");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(message.length() > ChatHistoryService.MAX_USER_MESSAGE_LENGTH,
+                ErrorCode.PARAM_ERROR, "用户消息不能超过" + ChatHistoryService.MAX_USER_MESSAGE_LENGTH + "个字符");
 
         //查询应用信息
         App app = this.getById(appId);

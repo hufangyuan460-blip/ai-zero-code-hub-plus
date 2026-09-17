@@ -30,14 +30,17 @@ public class SimpleTextStreamHandler {
      */
     public Flux<String> handle(Flux<String> originFlux, ChatHistoryService chatHistoryService, long appId, User loginUser) {
         StringBuilder aiResponseBuilder = new StringBuilder();
+        boolean[] aiResponseTooLong = {false};
         return originFlux.map(chunk -> {
                     // 收集AI响应内容
-                    aiResponseBuilder.append(chunk);
+                    appendHistoryContent(aiResponseBuilder, chunk, aiResponseTooLong);
                     return chunk;
                 })
                 .doOnComplete(() -> {
                     // 流式响应完成后，添加AI消息到对话历史
-                    String aiResponse = aiResponseBuilder.toString();
+                    String aiResponse = aiResponseTooLong[0]
+                            ? ChatHistoryService.OVERSIZED_AI_HISTORY_PLACEHOLDER
+                            : aiResponseBuilder.toString();
                     saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser, chatHistoryService);
                 })
                 .doOnError(error -> {
@@ -45,6 +48,18 @@ public class SimpleTextStreamHandler {
                     String errorMessage = "AI回复失败: " + error.getMessage();
                     saveChatHistory(appId, errorMessage, ChatHistoryMessageTypeEnum.AI, loginUser,chatHistoryService);
                 });
+    }
+
+    private void appendHistoryContent(StringBuilder builder, String chunk, boolean[] tooLong) {
+        if (tooLong[0] || chunk == null) {
+            return;
+        }
+        if (builder.length() + chunk.length() > ChatHistoryService.MAX_AI_HISTORY_LENGTH) {
+            builder.setLength(0);
+            tooLong[0] = true;
+            return;
+        }
+        builder.append(chunk);
     }
 
     /**

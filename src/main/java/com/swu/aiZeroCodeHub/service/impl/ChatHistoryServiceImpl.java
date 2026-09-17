@@ -18,6 +18,7 @@ import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.enums.ChatHistoryMessageTypeEnum;
 import com.swu.aiZeroCodeHub.model.vo.chatHistory.ChatHistoryVO;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
+import com.swu.aiZeroCodeHub.constant.UserConstant;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
@@ -50,10 +51,26 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用不存在");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(ChatHistoryMessageTypeEnum.getEnumByValue(messageType) == null, ErrorCode.PARAM_ERROR, "消息类型错误");
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(content), ErrorCode.PARAM_ERROR, "消息内容不能为空");
+        if (ChatHistoryMessageTypeEnum.USER.getValue().equals(messageType)
+                && content.length() > MAX_USER_MESSAGE_LENGTH) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR,
+                    "用户消息不能超过" + MAX_USER_MESSAGE_LENGTH + "个字符");
+        }
+        if (ChatHistoryMessageTypeEnum.AI.getValue().equals(messageType)
+                && content.length() > MAX_AI_HISTORY_LENGTH) {
+            content = OVERSIZED_AI_HISTORY_PLACEHOLDER;
+        }
 
         // 校验应用是否存在
         App app = appMapper.selectOneById(appId);
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(loginUser == null || loginUser.getId() == null,
+                ErrorCode.NOT_LOGIN_ERROR, "用户未登录");
+        boolean isOwner = loginUser.getId().equals(app.getUserId());
+        boolean isAdmin = UserConstant.ADMIN_ROLE.equals(loginUser.getUserRole());
+        if (!isOwner && !isAdmin) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限写入该应用的聊天记录");
+        }
 
         // 创建对话历史
         ChatHistory chatHistory = new ChatHistory();
@@ -83,15 +100,12 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
         App app = appMapper.selectOneById(appId);
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
 
-        // Allow access if:
-        // 1. User is the creator
-        // 2. User is admin
-        // 3. App is featured (priority > 0)
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(loginUser == null || loginUser.getId() == null,
+                ErrorCode.NOT_LOGIN_ERROR, "用户未登录");
         boolean isCreator = app.getUserId().equals(loginUser.getId());
-        boolean isAdmin = "admin".equals(loginUser.getUserRole());
-        boolean isFeatured = app.getPriority() != null && app.getPriority() > 0;
+        boolean isAdmin = UserConstant.ADMIN_ROLE.equals(loginUser.getUserRole());
 
-        if (!isCreator && !isAdmin && !isFeatured) {
+        if (!isCreator && !isAdmin) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限查看");
         }
 
@@ -181,11 +195,15 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
     public int loadChatHistoryToMemory(Long appId, MessageWindowChatMemory chatMemory, int maxCount) {
         try {
             // 直接构造查询条件，起始点为1而不是0，用于排除最新的用户消息
+            int memoryMessageCount = Math.min(Math.max(maxCount, 0), MAX_MEMORY_MESSAGES);
             QueryWrapper queryWrapper = QueryWrapper.create()
                     .eq(ChatHistory::getAppId, appId)
                     .orderBy(ChatHistory::getCreateTime, false)
-                    .limit(1, maxCount);
+                    .limit(1, memoryMessageCount);
             List<ChatHistory> historyList = this.list(queryWrapper);
+
+            // 重建服务时以 MySQL 为准，先清除该 appId 的 Redis 记忆，避免复用过期内容。
+            chatMemory.clear();
 
             if (CollUtil.isEmpty(historyList)) {
                 return 0;
@@ -196,9 +214,6 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
 
             // 按时间顺序添加到记忆中
             int loadedCount = 0;
-            // 先清理历史缓存，防止重复加载
-            chatMemory.clear();
-
             for (ChatHistory history : historyList) {
                 if (ChatHistoryMessageTypeEnum.USER.getValue().equals(history.getMessageType())) {
                     chatMemory.add(UserMessage.from(history.getContent()));

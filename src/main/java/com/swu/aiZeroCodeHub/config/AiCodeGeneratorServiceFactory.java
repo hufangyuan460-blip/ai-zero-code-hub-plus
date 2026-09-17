@@ -31,6 +31,8 @@ import java.time.Duration;
 @Configuration
 @Slf4j
 public class AiCodeGeneratorServiceFactory {
+    private static final int MAX_CHAT_MEMORY_MESSAGES = 20;
+
     @Autowired
     @Qualifier("openAiChatModelPrototype")
     private ObjectProvider<ChatModel> chatModelProvider;
@@ -53,16 +55,7 @@ public class AiCodeGeneratorServiceFactory {
      * @return
      */
     private AiCodeGeneratorService createAiCodeGeneratorService(long appId, CodeGenTypeEnum codeGenType) {
-        // 根据appId构建独立的对话记忆
-        MessageWindowChatMemory chatMemory = MessageWindowChatMemory.builder()
-                .id(appId)
-                .chatMemoryStore(redisChatMemoryStore)
-                .maxMessages(1000)
-                .build();
-        //从数据库加载历史数据到记忆中
-        chatHistoryService.loadChatHistoryToMemory(appId,chatMemory,20);
-
-
+        MessageWindowChatMemory chatMemory = createChatMemory(appId);
 
         // 根据代码生成类型选择不同的模型配置
         return switch (codeGenType) {
@@ -116,12 +109,7 @@ public class AiCodeGeneratorServiceFactory {
     public AiVueCreateService getVueCreateService(long appId) {
         String cacheKey = "VUE_CREATE_" + appId;
         return (AiVueCreateService) serviceCache.get(cacheKey, key -> {
-             MessageWindowChatMemory chatMemory = MessageWindowChatMemory.builder()
-                .id(appId)
-                .chatMemoryStore(redisChatMemoryStore)
-                .maxMessages(1000)
-                .build();
-            chatHistoryService.loadChatHistoryToMemory(appId, chatMemory, 20);
+             MessageWindowChatMemory chatMemory = createChatMemory(appId);
             
             return AiServices.builder(AiVueCreateService.class)
                     .streamingChatModel(reasoningStreamingChatModel)
@@ -141,12 +129,7 @@ public class AiCodeGeneratorServiceFactory {
     public AiVueModifyService getVueModifyService(long appId) {
         String cacheKey = "VUE_MODIFY_" + appId;
         return (AiVueModifyService) serviceCache.get(cacheKey, key -> {
-             MessageWindowChatMemory chatMemory = MessageWindowChatMemory.builder()
-                .id(appId)
-                .chatMemoryStore(redisChatMemoryStore)
-                .maxMessages(1000)
-                .build();
-            chatHistoryService.loadChatHistoryToMemory(appId, chatMemory, 20);
+             MessageWindowChatMemory chatMemory = createChatMemory(appId);
 
             return AiServices.builder(AiVueModifyService.class)
                     .streamingChatModel(reasoningStreamingChatModel)
@@ -158,6 +141,30 @@ public class AiCodeGeneratorServiceFactory {
                                     "Error: there is no tool called " + toolExecutionRequest.name()))
                     .build();
         });
+    }
+
+    /**
+     * 删除应用时失效该应用的全部 AI 服务实例，避免已删除应用继续复用内存中的代理和记忆。
+     */
+    public void invalidateAppCache(long appId) {
+        if (appId <= 0) {
+            return;
+        }
+        for (CodeGenTypeEnum codeGenType : CodeGenTypeEnum.values()) {
+            serviceCache.invalidate(buildCacheKey(appId, codeGenType));
+        }
+        serviceCache.invalidate("VUE_CREATE_" + appId);
+        serviceCache.invalidate("VUE_MODIFY_" + appId);
+    }
+
+    private MessageWindowChatMemory createChatMemory(long appId) {
+        MessageWindowChatMemory chatMemory = MessageWindowChatMemory.builder()
+                .id(appId)
+                .chatMemoryStore(redisChatMemoryStore)
+                .maxMessages(MAX_CHAT_MEMORY_MESSAGES)
+                .build();
+        chatHistoryService.loadChatHistoryToMemory(appId, chatMemory, MAX_CHAT_MEMORY_MESSAGES);
+        return chatMemory;
     }
 
     /**

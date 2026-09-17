@@ -18,6 +18,8 @@ const appId = route.params.appId as string
 const app = ref<AppVO>()
 const loading = ref(false)
 const deploying = ref(false)
+const deployFailed = ref(false)
+const deployError = ref('')
 const deployedUrl = ref<string>('')
 const codeGenType = ref('')
 const codeGenTypeMap: Record<string, string> = {
@@ -89,9 +91,18 @@ const downloadText = computed(() => {
   if (downloadStatus.value === 'downloading') return '下载中'
   if (downloadStatus.value === 'success') return '已完成'
   if (downloadStatus.value === 'error') return '重试下载'
-  if (!canDownload.value) return '部署后下载'
+  if (!canDownload.value) return deployFailed.value ? '请先重试部署' : '部署完成后下载'
   return '下载源码'
 })
+
+const getErrorMessage = (error: unknown, fallback: string) => {
+  if (error instanceof Error && error.message) return error.message
+  if (typeof error === 'object' && error !== null) {
+    const responseMessage = (error as { response?: { data?: { message?: string } } }).response?.data?.message
+    if (responseMessage) return responseMessage
+  }
+  return fallback
+}
 
 // Fetch App Info
 const loadAppInfo = async (silent = false) => {
@@ -197,6 +208,50 @@ const resetDeployTimeout = () => {
   }, 60000); // 60s 超时
 };
 
+const deployCurrentApp = async (loadingMsg: string) => {
+  if (!app.value || deploying.value) return false
+
+  deploying.value = true
+  deployFailed.value = false
+  deployError.value = ''
+  message.loading({ content: loadingMsg, key: 'auto_deploy', duration: 0 })
+
+  try {
+    const url = await deployApp({ appId: app.value.id })
+    if (!url) {
+      throw new Error('部署接口未返回部署地址')
+    }
+
+    deployedUrl.value = url
+    deployFailed.value = false
+    message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
+
+    try {
+      const fullUrl = window.location.origin + url
+      await captureAndUploadScreenshot(app.value.id, fullUrl)
+      console.log('自动生成封面成功')
+    } catch (screenshotError) {
+      console.error('自动生成封面失败', screenshotError)
+    }
+    return true
+  } catch (error) {
+    deployFailed.value = true
+    deployError.value = getErrorMessage(error, '部署失败，请稍后重试')
+    message.error({ content: `部署失败：${deployError.value}`, key: 'auto_deploy' })
+    return false
+  } finally {
+    deploying.value = false
+    loadHistory(false)
+    if (codeGenType.value !== 'vue_project') {
+      refreshPreview()
+    }
+  }
+}
+
+const retryDeploy = async () => {
+  await deployCurrentApp('正在重新部署，请耐心等待...')
+}
+
 const forceDeploy = async () => {
   if (eventSourceRef.value) {
     eventSourceRef.value.close();
@@ -206,35 +261,10 @@ const forceDeploy = async () => {
   }
 
   if (app.value) {
-      try {
-        deploying.value = true
-        const loadingMsg = codeGenType.value === 'vue_project'
-          ? '生成完毕（或长时间未响应），正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
-          : '生成完毕（或长时间未响应），正在自动部署中...'
-        
-        message.loading({ content: loadingMsg, key: 'auto_deploy', duration: 0 })
-        const url = await deployApp({ appId: app.value.id })
-        if (url) {
-          deployedUrl.value = url
-          message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
-
-          try {
-             const fullUrl = window.location.origin + url
-             await captureAndUploadScreenshot(app.value.id, fullUrl)
-             console.log('自动生成封面成功')
-          } catch (screenshotError) {
-             console.error('自动生成封面失败', screenshotError)
-          }
-        }
-      } catch {
-        message.error({ content: '自动部署失败', key: 'auto_deploy' })
-      } finally {
-        deploying.value = false
-        loadHistory(false)
-        if (codeGenType.value !== 'vue_project') {
-           refreshPreview()
-        }
-      }
+    const loadingMsg = codeGenType.value === 'vue_project'
+      ? '生成完毕（或长时间未响应），正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
+      : '生成完毕（或长时间未响应），正在自动部署中...'
+    await deployCurrentApp(loadingMsg)
   }
 };
 
@@ -244,6 +274,9 @@ const aiMsgIndexRef = ref<number>(0);
 
 const onGenerate = async (prompt: string) => {
   if (!app.value || !prompt) return
+
+  deployFailed.value = false
+  deployError.value = ''
 
   // Add User Message
   messages.value.push({ role: 'user', content: prompt })
@@ -324,34 +357,10 @@ const onGenerate = async (prompt: string) => {
     eventSource.close()
 
     if (app.value) {
-      try {
-        deploying.value = true
-        const loadingMsg = codeGenType.value === 'vue_project' 
-          ? '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
-          : '生成完毕，正在自动部署中...'
-        
-        message.loading({ content: loadingMsg, key: 'auto_deploy', duration: 0 })
-        const url = await deployApp({ appId: app.value.id })
-        if (url) {
-          deployedUrl.value = url
-          message.success({ content: '部署成功，已更新预览', key: 'auto_deploy' })
-          try {
-             const fullUrl = window.location.origin + url
-             await captureAndUploadScreenshot(app.value.id, fullUrl)
-             console.log('自动生成封面成功')
-          } catch (screenshotError) {
-             console.error('自动生成封面失败', screenshotError)
-          }
-        }
-      } catch {
-        message.error({ content: '自动部署失败', key: 'auto_deploy' })
-      } finally {
-        deploying.value = false
-        loadHistory(false)
-        if (codeGenType.value !== 'vue_project') {
-           refreshPreview()
-        }
-      }
+      const loadingMsg = codeGenType.value === 'vue_project'
+        ? '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
+        : '生成完毕，正在自动部署中...'
+      await deployCurrentApp(loadingMsg)
     }
   })
 
@@ -416,7 +425,7 @@ const saveBlob = (blob: Blob, fileName: string) => {
 const handleDownload = async () => {
   if (!app.value) return
   if (!canDownload.value) {
-    message.warning('部署完成之前不可以下载源码')
+    message.warning(deployFailed.value ? '应用尚未成功部署，请先重试部署' : '部署完成后才能下载源码')
     return
   }
   downloading.value = true
@@ -535,9 +544,18 @@ const onIframeLoad = () => {
       </div>
       <div class="right">
         <div class="download-wrap">
+          <a-button
+            v-if="deployFailed"
+            type="primary"
+            :loading="deploying"
+            @click="retryDeploy"
+          >
+            重试部署
+          </a-button>
           <a-button :loading="downloading" :disabled="!canDownload" @click="handleDownload">{{ downloadText }}</a-button>
           <a-progress v-if="downloadStatus === 'downloading' && downloadProgress > 0" :percent="downloadProgress" size="small" :show-info="false" />
           <span v-else-if="downloadStatus === 'error'" class="download-error">下载失败</span>
+          <span v-if="deployFailed" class="deploy-error">部署失败：{{ deployError }}</span>
         </div>
       </div>
     </header>
@@ -668,6 +686,12 @@ const onIframeLoad = () => {
 .download-error {
     color: #ff4d4f;
     font-size: 12px;
+}
+.deploy-error {
+    color: #ff4d4f;
+    font-size: 12px;
+    max-width: 360px;
+    white-space: normal;
 }
 .app-name {
     font-size: 18px;

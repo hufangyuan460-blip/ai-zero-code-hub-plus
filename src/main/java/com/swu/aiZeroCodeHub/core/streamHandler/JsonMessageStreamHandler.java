@@ -55,7 +55,7 @@ public class JsonMessageStreamHandler {
                                Long appId,
                                User loginUser) {
         // 收集数据用于生成后端记忆格式
-        StringBuilder chatHistoryStringBuilder = new StringBuilder();
+        HistoryAccumulator historyAccumulator = new HistoryAccumulator();
         Set<String> seenToolIds = new HashSet<>();
 
         return originFlux
@@ -63,12 +63,12 @@ public class JsonMessageStreamHandler {
                     // 使用SSE解析器处理
                     List<String> jsonMessages = sseParser.parseSSE(chunk);
                     return Flux.fromIterable(jsonMessages)
-                            .map(json -> handleJsonMessageChunk(json, chatHistoryStringBuilder, seenToolIds))
+                            .map(json -> handleJsonMessageChunk(json, historyAccumulator, seenToolIds))
                             .filter(StrUtil::isNotEmpty);
                 })
                 .doOnComplete(() -> {
                     // 保存对话历史
-                    String aiResponse = chatHistoryStringBuilder.toString();
+                    String aiResponse = historyAccumulator.content();
                     if (StrUtil.isNotBlank(aiResponse)) {
                         saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser,chatHistoryService);
                     }
@@ -84,7 +84,7 @@ public class JsonMessageStreamHandler {
      * 解析并收集 TokenStream 数据
      */
     private String handleJsonMessageChunk(String chunk,
-                                          StringBuilder chatHistoryStringBuilder,
+                                          HistoryAccumulator historyAccumulator,
                                           Set<String> seenToolIds) {
         // 解析 JSON
         StreamMessage streamMessage = JSONUtil.toBean(chunk, StreamMessage.class);
@@ -100,7 +100,7 @@ public class JsonMessageStreamHandler {
                 AiResponseMessage aiMessage = JSONUtil.toBean(chunk, AiResponseMessage.class);
                 String data = aiMessage.getData();
                 // 直接拼接响应
-                chatHistoryStringBuilder.append(data);
+                historyAccumulator.append(data);
                 return data;
             }
             case TOOL_REQUEST -> {
@@ -140,7 +140,9 @@ public class JsonMessageStreamHandler {
             }
             case TOOL_EXECUTED -> {
                 ToolExecutedMessage toolExecutedMessage = JSONUtil.toBean(chunk, ToolExecutedMessage.class);
-                JSONObject jsonObject = JSONUtil.parseObj(toolExecutedMessage.getArguments());
+                JSONObject jsonObject = StrUtil.isBlank(toolExecutedMessage.getArguments())
+                        ? JSONUtil.createObj()
+                        : JSONUtil.parseObj(toolExecutedMessage.getArguments());
                 
                 // 尝试解析不同工具的参数
                 String toolName = toolExecutedMessage.getName();
@@ -177,19 +179,63 @@ public class JsonMessageStreamHandler {
                 } else if ("getProjectFileTree".equals(toolName)) {
                      result = String.format("[工具调用] 获取目录结构 %s", path);
                 } else {
-                     // 默认展示
+                     // 默认展示给前端，历史记录不复用完整参数
                      result = String.format("[工具调用] %s %s", toolName, jsonObject.toString());
                 }
 
-                // 输出前端和要持久化的内容
+                historyAccumulator.append("\n\n" + buildToolHistorySummary(toolName, path) + "\n\n");
+
+                // 前端可以继续展示代码内容，但持久化历史只保留工具摘要
                 String output = String.format("\n\n%s\n\n", result);
-                chatHistoryStringBuilder.append(output);
                 return output;
             }
             default -> {
                 log.error("不支持的消息类型: {}", typeEnum);
                 return "";
             }
+        }
+    }
+
+    private String buildToolHistorySummary(String toolName, String path) {
+        String target = StrUtil.isBlank(path) ? "" : "：" + path;
+        if ("writeFile".equals(toolName)) {
+            return "已写入文件" + target;
+        }
+        if ("modifyFile".equals(toolName)) {
+            return "已修改文件" + target;
+        }
+        if ("readFile".equals(toolName)) {
+            return "已读取文件" + target;
+        }
+        if ("deleteFile".equals(toolName)) {
+            return "已删除文件" + target;
+        }
+        if ("getProjectFileTree".equals(toolName)) {
+            return "已获取目录结构" + target;
+        }
+        return "工具执行完成：" + StrUtil.blankToDefault(toolName, "未知工具") + target;
+    }
+
+    private static class HistoryAccumulator {
+        private final StringBuilder content = new StringBuilder();
+        private boolean tooLong;
+
+        private void append(String value) {
+            if (tooLong || value == null) {
+                return;
+            }
+            if (content.length() + value.length() > ChatHistoryService.MAX_AI_HISTORY_LENGTH) {
+                content.setLength(0);
+                tooLong = true;
+                return;
+            }
+            content.append(value);
+        }
+
+        private String content() {
+            return tooLong
+                    ? ChatHistoryService.OVERSIZED_AI_HISTORY_PLACEHOLDER
+                    : content.toString();
         }
     }
 

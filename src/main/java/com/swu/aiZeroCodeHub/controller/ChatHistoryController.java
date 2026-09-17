@@ -7,7 +7,6 @@ import com.swu.aiZeroCodeHub.common.vo.BaseResponse;
 import com.swu.aiZeroCodeHub.constant.UserConstant;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
-import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryAddRequest;
 import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryQueryRequest;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.vo.chatHistory.ChatHistoryVO;
@@ -36,23 +35,6 @@ public class ChatHistoryController {
     private UserService userService;
 
     // region 增删改查
-
-    /**
-     * 创建对话历史（仅测试用，实际对话在 Chat 流程中自动保存）
-     *
-     * @param chatHistoryAddRequest
-     * @param request
-     * @return
-     */
-    @PostMapping("/add")
-    public BaseResponse<Long> addChatHistory(@RequestBody ChatHistoryAddRequest chatHistoryAddRequest, HttpServletRequest request) {
-        if (chatHistoryAddRequest == null) {
-            ThrowUtils.throwExceptionByConditionAndErrorCode(true, ErrorCode.PARAM_ERROR);
-        }
-        User loginUser = userService.getLoginUser(request);
-        long newChatHistoryId = chatHistoryService.addChatHistory(chatHistoryAddRequest, loginUser);
-        return ResultUtils.success(newChatHistoryId);
-    }
 
     /**
      * 分页获取对话历史（用户，需传 appId）

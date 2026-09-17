@@ -305,6 +305,7 @@ public class AppController {
         if (!app.getUserId().equals(loginUser.getId())) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限下载该应用代码");
         }
+        ensureAppDeployed(app);
 
         File sourceDir = resolveCodeOutputDir(appId, app.getCodeGenType());
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(sourceDir == null,
@@ -340,6 +341,7 @@ public class AppController {
         if (!app.getUserId().equals(loginUser.getId())) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限下载该应用代码");
         }
+        ensureAppDeployed(app);
         String token = request.getParameter("token");
         if (StrUtil.isNotBlank(token)) {
             boolean valid = projectDownloadService.validateDownloadToken(token, appId, loginUser.getId());
@@ -357,6 +359,17 @@ public class AppController {
 
         // 7. 调用通用下载服务
         projectDownloadService.downloadProjectAsZip(sourceDir.getAbsolutePath(), downloadFileName, request, response);
+    }
+
+    /**
+     * 下载必须建立在应用成功部署的状态之上，避免仅凭代码生成目录绕过前端限制。
+     */
+    private void ensureAppDeployed(App app) {
+        boolean notDeployed = app == null
+                || StrUtil.isBlank(app.getDeployKey())
+                || app.getDeployedTime() == null;
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(notDeployed,
+                ErrorCode.FORBIDDEN_ERROR, "应用尚未成功部署，部署完成后才能下载源码");
     }
 
     private File resolveCodeOutputDir(Long appId, String preferredType) {

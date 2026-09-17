@@ -14,6 +14,11 @@ import dev.langchain4j.memory.chat.MessageWindowChatMemory;
  */
 public interface ChatHistoryService extends IService<ChatHistory> {
 
+    int MAX_MEMORY_MESSAGES = 20;
+    int MAX_USER_MESSAGE_LENGTH = 8_000;
+    int MAX_AI_HISTORY_LENGTH = 12_000;
+    String OVERSIZED_AI_HISTORY_PLACEHOLDER = "AI 回复过长，完整结果已写入项目文件";
+
     /**
      * 添加对话历史
      *
