@@ -2,12 +2,13 @@
 import { ref, onMounted, nextTick, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { getMyAppInfo, deployApp, getDownloadLink, captureAndUploadScreenshot, type AppVO } from '@/api/app'
+import { getMyAppInfo, deployApp, getDownloadLink, cancelGeneration, captureAndUploadScreenshot, createGeneration, getGeneration, generationStreamUrl, type AppVO } from '@/api/app'
 import { listChatHistoryByPage, type ChatHistoryVO } from '@/api/chat'
 import { request } from '@/api/request'
 import { useUserStore } from '@/stores/user'
 import { useVisualEditor } from '@/composables/useVisualEditor'
 import { FormOutlined, SendOutlined, FullscreenOutlined } from '@ant-design/icons-vue'
+import { canStartAutoDeployment } from '@/utils/generationRunPolicy'
 
 const route = useRoute()
 const router = useRouter()
@@ -57,6 +58,7 @@ interface Message {
   loading?: boolean
 }
 type ExecutionMode = 'DIRECT' | 'WORKFLOW'
+type RunStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT'
 interface WorkflowStep {
   name: string
   status: string
@@ -70,10 +72,31 @@ const workflowSteps = ref<WorkflowStep[]>([])
 const workflowFailed = ref(false)
 const workflowError = ref('')
 const lastFailedPrompt = ref('')
-const isGenerating = computed(() => messages.value.some(message => message.loading))
+const activeRunId = ref<string | null>(null)
+const runStatus = ref<RunStatus | null>(null)
+const runCurrentStep = ref('')
+const runRetryCount = ref(0)
+const runMaxRetryCount = ref(2)
+const cancellingRun = ref(false)
+const settlingRun = ref(false)
+const isGenerating = computed(() => messages.value.some(message => message.loading) || settlingRun.value)
+const canCancelGeneration = computed(() => Boolean(
+  activeRunId.value && (runStatus.value === 'PENDING' || runStatus.value === 'RUNNING'),
+))
 const executionModeDescription = computed(() => executionMode.value === 'WORKFLOW'
   ? '会执行规划、资源收集、质检和构建，耗时较长。'
   : '速度快，适合小修改和连续对话。')
+const runStatusLabelMap: Record<string, string> = {
+  PENDING: '排队中',
+  RUNNING: '运行中',
+  SUCCEEDED: '已完成',
+  FAILED: '失败',
+  CANCELLED: '已取消',
+  TIMED_OUT: '已超时',
+}
+const runStatusLabel = computed(() => runStatusLabelMap[runStatus.value || ''] || '未开始')
+const activeRunStorageKey = computed(() => `agent:active-run:${appId}`)
+const activeRunSequenceStorageKey = computed(() => `${activeRunStorageKey.value}:sequence`)
 
 // History Pagination
 const hasMore = ref(false)
@@ -206,23 +229,6 @@ const loadHistory = async (isLoadMore = false) => {
   }
 }
 
-// 自动部署超时计时器
-let deployTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
-
-const resetDeployTimeout = () => {
-  if (deployTimeoutTimer) {
-    clearTimeout(deployTimeoutTimer);
-  }
-  if (codeGenType.value === 'vue_project' || lastExecutionMode.value === 'WORKFLOW') {
-    return
-  }
-  // 如果 60 秒没有收到新消息，强制结束并部署
-  deployTimeoutTimer = setTimeout(() => {
-    console.log('SSE Stream timeout, forcing deploy...');
-    forceDeploy();
-  }, 60000); // 60s 超时
-};
-
 const deployCurrentApp = async (loadingMsg: string) => {
   if (!app.value || deploying.value) return false
 
@@ -267,25 +273,51 @@ const retryDeploy = async () => {
   await deployCurrentApp('正在重新部署，请耐心等待...')
 }
 
-const forceDeploy = async () => {
-  if (eventSourceRef.value) {
-    eventSourceRef.value.close();
-  }
-  if (messages.value[aiMsgIndexRef.value]) {
-    messages.value[aiMsgIndexRef.value]!.loading = false;
-  }
-
-  if (app.value) {
-    const loadingMsg = codeGenType.value === 'vue_project'
-      ? '生成完毕（或长时间未响应），正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
-      : '生成完毕（或长时间未响应），正在自动部署中...'
-    await deployCurrentApp(loadingMsg)
-  }
-};
-
 // SSE Generation
 const eventSourceRef = ref<EventSource | null>(null);
 const aiMsgIndexRef = ref<number>(0);
+const reconnecting = ref(false)
+const reconnectAttempt = ref(0)
+const reconnectTimer = ref<ReturnType<typeof setTimeout> | null>(null)
+const reconnectAttempts = new Map<string, number>()
+const terminalRunIds = new Set<string>()
+const businessErrorRunIds = new Set<string>()
+const deploymentRunIds = new Set<string>()
+const deploymentInFlightRunIds = new Set<string>()
+const MAX_RECONNECT_ATTEMPTS = 5
+
+const deploymentStorageKey = (runId: string) => `agent:deployment:${appId}:${runId}`
+const getDeploymentState = (runId: string) => sessionStorage.getItem(deploymentStorageKey(runId))
+const markDeploymentStarted = (runId: string) => {
+  deploymentInFlightRunIds.add(runId)
+  sessionStorage.setItem(deploymentStorageKey(runId), 'in_progress')
+}
+const markDeploymentSucceeded = (runId: string) => {
+  deploymentInFlightRunIds.delete(runId)
+  deploymentRunIds.add(runId)
+  sessionStorage.setItem(deploymentStorageKey(runId), 'succeeded')
+}
+const clearDeploymentAfterFailure = (runId: string) => {
+  deploymentInFlightRunIds.delete(runId)
+  deploymentRunIds.delete(runId)
+  sessionStorage.removeItem(deploymentStorageKey(runId))
+}
+const lastSequenceForRun = (runId: string) => {
+  const stored = sessionStorage.getItem(activeRunSequenceStorageKey.value)
+  if (!stored) return 0
+  try {
+    const value = JSON.parse(stored) as { runId?: string, sequence?: number }
+    return value.runId === runId && Number.isFinite(value.sequence) ? Number(value.sequence) : 0
+  } catch {
+    return 0
+  }
+}
+const persistSequence = (runId: string, sequence: unknown) => {
+  const numericSequence = typeof sequence === 'number' ? sequence : Number(sequence)
+  if (!Number.isFinite(numericSequence) || numericSequence <= 0) return
+  if (numericSequence <= lastSequenceForRun(runId)) return
+  sessionStorage.setItem(activeRunSequenceStorageKey.value, JSON.stringify({ runId, sequence: numericSequence }))
+}
 
 const appendToAiMessage = (index: number, content: string) => {
   if (content && messages.value[index]) {
@@ -301,6 +333,46 @@ const parseEventData = (eventData: string): unknown => {
   }
 }
 
+const updateRunStateFromEvent = (eventData: string, eventSequence?: string): Record<string, unknown> | null => {
+  const data = parseEventData(eventData)
+  if (typeof data !== 'object' || data === null) return null
+  const typedData = data as Record<string, unknown>
+  if (typeof typedData.runId === 'string') {
+    activeRunId.value = typedData.runId
+    sessionStorage.setItem(activeRunStorageKey.value, typedData.runId)
+    persistSequence(typedData.runId, typedData.sequence ?? eventSequence)
+  }
+  if (typeof typedData.status === 'string') {
+    const status = typedData.status as RunStatus
+    if (['PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(status)) {
+      runStatus.value = status
+    }
+  }
+  if (typeof typedData.currentStep === 'string') runCurrentStep.value = typedData.currentStep
+  if (typeof typedData.retryCount === 'number') runRetryCount.value = typedData.retryCount
+  if (typeof typedData.retryCount === 'string' && Number.isFinite(Number(typedData.retryCount))) {
+    runRetryCount.value = Number(typedData.retryCount)
+  }
+  if (typeof typedData.maxRetryCount === 'number') runMaxRetryCount.value = typedData.maxRetryCount
+  if (typeof typedData.maxRetryCount === 'string' && Number.isFinite(Number(typedData.maxRetryCount))) {
+    runMaxRetryCount.value = Number(typedData.maxRetryCount)
+  }
+  return typedData
+}
+
+const clearActiveRun = () => {
+  activeRunId.value = null
+  cancellingRun.value = false
+  sessionStorage.removeItem(activeRunStorageKey.value)
+  sessionStorage.removeItem(activeRunSequenceStorageKey.value)
+  reconnecting.value = false
+  reconnectAttempt.value = 0
+  if (reconnectTimer.value) {
+    clearTimeout(reconnectTimer.value)
+    reconnectTimer.value = null
+  }
+}
+
 const appendGenerationMessage = (eventData: string, messageIndex: number) => {
   const data = parseEventData(eventData)
   if (typeof data !== 'object' || data === null) {
@@ -309,6 +381,10 @@ const appendGenerationMessage = (eventData: string, messageIndex: number) => {
   }
 
   const typedData = data as Record<string, unknown>
+  if (typeof typedData.message === 'string') {
+    appendToAiMessage(messageIndex, typedData.message)
+    return
+  }
   if (typedData.type === 'ai_response' && typeof typedData.data === 'string') {
     appendToAiMessage(messageIndex, typedData.data)
     return
@@ -360,6 +436,210 @@ const handleWorkflowStep = (eventData: string) => {
   }
 }
 
+const markBusinessError = (runId: string, messageText: string, prompt: string, messageIndex: number) => {
+  workflowFailed.value = true
+  workflowError.value = messageText
+  lastFailedPrompt.value = prompt
+  if (!businessErrorRunIds.has(runId)) {
+    businessErrorRunIds.add(runId)
+    appendToAiMessage(messageIndex, `\n[生成失败：${messageText}]`)
+  }
+  if (messages.value[messageIndex]) messages.value[messageIndex]!.loading = false
+  settlingRun.value = true
+}
+
+const finishRun = async (runId: string, status: RunStatus, messageText: string, messageIndex: number, prompt = '') => {
+  if (terminalRunIds.has(runId)) return
+  terminalRunIds.add(runId)
+  if (eventSourceRef.value) {
+    eventSourceRef.value.close()
+    eventSourceRef.value = null
+  }
+  if (messages.value[messageIndex]) messages.value[messageIndex]!.loading = false
+  if (status === 'CANCELLED' && !businessErrorRunIds.has(runId)) {
+    appendToAiMessage(messageIndex, '\n[生成任务已取消]')
+    workflowFailed.value = true
+    workflowError.value = '生成任务已取消'
+  } else if ((status === 'FAILED' || status === 'TIMED_OUT') && !businessErrorRunIds.has(runId)) {
+    const safeMessage = messageText || (status === 'TIMED_OUT' ? '生成任务超时，请稍后重试' : '生成失败，请稍后重试')
+    appendToAiMessage(messageIndex, `\n[生成失败：${safeMessage}]`)
+    workflowFailed.value = true
+    workflowError.value = safeMessage
+    lastFailedPrompt.value = prompt || lastFailedPrompt.value
+  }
+  runStatus.value = status
+  clearActiveRun()
+  settlingRun.value = false
+  await loadHistory(false)
+  const deploymentState = getDeploymentState(runId)
+  if (status === 'SUCCEEDED' && deploymentState === 'in_progress' && !deploymentInFlightRunIds.has(runId)) {
+    deployFailed.value = true
+    deployError.value = '上次部署状态未知，请重试部署'
+  }
+  if (status === 'SUCCEEDED' && app.value
+    && canStartAutoDeployment(runId, deploymentRunIds, deploymentInFlightRunIds, deploymentState as 'in_progress' | 'succeeded' | null)) {
+    markDeploymentStarted(runId)
+    const loadingMsg = codeGenType.value === 'vue_project'
+      ? '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
+      : '生成完毕，正在自动部署中...'
+    const deployed = await deployCurrentApp(loadingMsg)
+    if (deployed) {
+      markDeploymentSucceeded(runId)
+    } else {
+      clearDeploymentAfterFailure(runId)
+    }
+  }
+}
+
+const scheduleRunReconnect = (runId: string, messageIndex: number, prompt: string) => {
+  if (terminalRunIds.has(runId) || reconnectTimer.value) return
+  const attempt = reconnectAttempts.get(runId) || 0
+  if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+    reconnecting.value = true
+    void getGeneration(runId).then(async status => {
+      updateRunStateFromEvent(JSON.stringify(status))
+      if (status.status !== 'PENDING' && status.status !== 'RUNNING') {
+        await finishRun(runId, status.status, status.errorMessage || '', messageIndex, prompt)
+      } else {
+        message.warning('连接恢复失败，生成任务仍在服务器执行中，可继续取消或稍后刷新查看状态')
+      }
+    }).catch(() => {
+      message.warning('暂时无法查询生成状态，任务仍保留在服务器，可继续取消或稍后刷新')
+    })
+    return
+  }
+  const nextAttempt = attempt + 1
+  reconnectAttempts.set(runId, nextAttempt)
+  reconnectAttempt.value = nextAttempt
+  reconnecting.value = true
+  const delay = Math.min(1000 * (2 ** (nextAttempt - 1)), 8000)
+  reconnectTimer.value = setTimeout(async () => {
+    reconnectTimer.value = null
+    if (terminalRunIds.has(runId)) return
+    try {
+      const status = await getGeneration(runId)
+      updateRunStateFromEvent(JSON.stringify(status))
+      if (status.status !== 'PENDING' && status.status !== 'RUNNING') {
+        await finishRun(runId, status.status, status.errorMessage || '', messageIndex, prompt)
+        return
+      }
+      openRunStream(runId, messageIndex, prompt, true)
+    } catch {
+      scheduleRunReconnect(runId, messageIndex, prompt)
+    }
+  }, delay)
+}
+
+const handleNetworkDisconnect = (runId: string, messageIndex: number, prompt: string) => {
+  if (terminalRunIds.has(runId)) return
+  if (eventSourceRef.value) {
+    eventSourceRef.value.close()
+    eventSourceRef.value = null
+  }
+  // A browser/network error is not a server FAILED state. Keep sessionStorage and
+  // the cooperative cancel path available while the bounded reconnect loop runs.
+  reconnecting.value = true
+  scheduleRunReconnect(runId, messageIndex, prompt)
+}
+
+const openRunStream = (runId: string, messageIndex: number, prompt: string, isReconnect = false) => {
+  if (terminalRunIds.has(runId)) return
+  if (eventSourceRef.value) eventSourceRef.value.close()
+  const eventSource = new EventSource(generationStreamUrl(runId, lastSequenceForRun(runId)), { withCredentials: true })
+  eventSourceRef.value = eventSource
+  reconnecting.value = false
+  if (!isReconnect) {
+    reconnectAttempts.set(runId, 0)
+    reconnectAttempt.value = 0
+  }
+  const handleMessageEvent = (event: MessageEvent) => {
+    updateRunStateFromEvent(event.data, event.lastEventId)
+    try {
+      appendGenerationMessage(event.data, messageIndex)
+    } catch {
+      appendToAiMessage(messageIndex, event.data)
+    }
+    scrollToBottom()
+  }
+  eventSource.addEventListener('message', handleMessageEvent)
+  eventSource.addEventListener('run_started', event => {
+    const typedEvent = event as MessageEvent
+    updateRunStateFromEvent(typedEvent.data, typedEvent.lastEventId)
+  })
+  eventSource.addEventListener('workflow_start', event => {
+    const typedEvent = event as MessageEvent
+    updateRunStateFromEvent(typedEvent.data, typedEvent.lastEventId)
+    workflowFailed.value = false
+    workflowError.value = ''
+    const data = parseEventData((event as MessageEvent).data)
+    if (typeof data === 'object' && data !== null && typeof (data as Record<string, unknown>).message === 'string'
+      && !workflowSteps.value.some(step => step.name === '增强工作流')) {
+      workflowSteps.value.push({ name: '增强工作流', status: (data as Record<string, unknown>).message as string })
+    }
+  })
+  eventSource.addEventListener('step_started', event => {
+    const typedEvent = event as MessageEvent
+    updateRunStateFromEvent(typedEvent.data, typedEvent.lastEventId)
+    handleWorkflowStep((event as MessageEvent).data)
+  })
+  eventSource.addEventListener('step_completed', event => {
+    const typedEvent = event as MessageEvent
+    updateRunStateFromEvent(typedEvent.data, typedEvent.lastEventId)
+    handleWorkflowStep((event as MessageEvent).data)
+  })
+  eventSource.addEventListener('workflow_completed', event => {
+    const typedEvent = event as MessageEvent
+    updateRunStateFromEvent(typedEvent.data, typedEvent.lastEventId)
+    handleWorkflowStep(JSON.stringify({ step: '增强工作流', status: '完成' }))
+  })
+  // Business failures use a dedicated event name. EventSource.onerror remains
+  // reserved for network/protocol failures and must not start a reconnect.
+  eventSource.addEventListener('generation_error', event => {
+    const typedEvent = event as MessageEvent
+    const data = updateRunStateFromEvent(typedEvent.data || '', typedEvent.lastEventId)
+    const errorMessage = typeof data?.message === 'string' ? data.message : '生成失败，请稍后重试'
+    markBusinessError(runId, errorMessage, prompt, messageIndex)
+    scrollToBottom()
+  })
+  eventSource.addEventListener('cancelled', event => {
+    const typedEvent = event as MessageEvent
+    const data = updateRunStateFromEvent(typedEvent.data || '', typedEvent.lastEventId)
+    void finishRun(runId, 'CANCELLED', typeof data?.message === 'string' ? data.message : '生成任务已取消', messageIndex, prompt)
+  })
+  eventSource.addEventListener('done', event => {
+    const typedEvent = event as MessageEvent
+    const data = updateRunStateFromEvent(typedEvent.data || '', typedEvent.lastEventId)
+    const candidateStatus = data?.status as RunStatus
+    const finalStatus = ['SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(candidateStatus)
+      ? candidateStatus
+      : 'FAILED'
+    void finishRun(runId, finalStatus, typeof data?.message === 'string' ? data.message : '', messageIndex, prompt)
+  })
+  eventSource.addEventListener('replay_reset', event => {
+    const typedEvent = event as MessageEvent
+    const data = updateRunStateFromEvent(typedEvent.data || '', typedEvent.lastEventId)
+    const firstAvailable = Number(data?.firstAvailableSequence)
+    if (Number.isFinite(firstAvailable) && firstAvailable > 0) {
+      persistSequence(runId, firstAvailable - 1)
+    }
+    // The missing prefix cannot be reconstructed from the bounded server
+    // window. Querying the authoritative state before resuming prevents a
+    // stale client from changing deployment or terminal state.
+    void getGeneration(runId).then(async status => {
+      updateRunStateFromEvent(JSON.stringify(status))
+      if (status.status !== 'PENDING' && status.status !== 'RUNNING') {
+        await finishRun(runId, status.status, status.errorMessage || '', messageIndex, prompt)
+      } else if (!terminalRunIds.has(runId)) {
+        openRunStream(runId, messageIndex, prompt, true)
+      }
+    }).catch(() => {
+      reconnecting.value = true
+      message.warning('连接恢复中，暂时无法查询生成状态')
+    })
+  })
+  eventSource.onerror = () => handleNetworkDisconnect(runId, messageIndex, prompt)
+}
+
 const onGenerate = async (prompt: string, requestedMode: ExecutionMode = executionMode.value) => {
   if (!app.value || !prompt || isGenerating.value || deploying.value) return
 
@@ -367,6 +647,14 @@ const onGenerate = async (prompt: string, requestedMode: ExecutionMode = executi
   deployError.value = ''
   workflowFailed.value = false
   workflowError.value = ''
+  activeRunId.value = null
+  runStatus.value = 'PENDING'
+  runCurrentStep.value = '排队中'
+  runRetryCount.value = 0
+  runMaxRetryCount.value = 2
+  cancellingRun.value = false
+  settlingRun.value = false
+  sessionStorage.removeItem(activeRunSequenceStorageKey.value)
   lastExecutionMode.value = requestedMode
   if (requestedMode === 'WORKFLOW') {
     workflowSteps.value = []
@@ -382,111 +670,45 @@ const onGenerate = async (prompt: string, requestedMode: ExecutionMode = executi
 
   scrollToBottom()
 
-  // Start SSE
-  // Note: EventSource does not support custom headers, but supports cookies via withCredentials
   const type = codeGenType.value
   const mode = requestedMode
-  // Fix garbled characters: use encodeURIComponent for userMessage
-  // And ensure backend handles encoding correctly (it usually does with URL parameters)
-  // Double check if backend requires specific charset in content-type, but GET query params are standard.
-  const eventSource = new EventSource(
-    `/api/app/chat/gen/code?appId=${appId}&userMessage=${encodeURIComponent(prompt)}&codeGenType=${type}&executionMode=${mode}`,
-    { withCredentials: true }
-  )
-  eventSourceRef.value = eventSource;
-
-  // 启动超时计时器
-  resetDeployTimeout();
-
-  const handleMessageEvent = (event: MessageEvent) => {
-    // 收到任意消息都重置超时计时器
-    resetDeployTimeout();
-
-    try {
-      appendGenerationMessage(event.data, aiMsgIndex)
-    } catch (e) {
-      console.error("Error processing SSE message:", e);
-      appendToAiMessage(aiMsgIndex, event.data)
-    }
-    scrollToBottom()
-  }
-  eventSource.addEventListener('message', handleMessageEvent)
-
-  eventSource.addEventListener('workflow_start', (event) => {
-    workflowFailed.value = false
-    workflowError.value = ''
-    workflowSteps.value = []
-    const data = parseEventData((event as MessageEvent).data)
-    if (typeof data === 'object' && data !== null && typeof (data as Record<string, unknown>).message === 'string') {
-      workflowSteps.value.push({ name: '增强工作流', status: (data as Record<string, unknown>).message as string })
-    }
-  })
-
-  eventSource.addEventListener('step_started', (event) => {
-    handleWorkflowStep((event as MessageEvent).data)
-  })
-
-  eventSource.addEventListener('step_completed', (event) => {
-    handleWorkflowStep((event as MessageEvent).data)
-  })
-
-  eventSource.addEventListener('workflow_completed', () => {
-    handleWorkflowStep(JSON.stringify({ step: '增强工作流', status: '完成' }))
-    resetDeployTimeout()
-  })
-
-  eventSource.addEventListener('error', (event) => {
-    const messageEvent = event as MessageEvent
-    const data = parseEventData(messageEvent.data || '')
-    let errorMessage = '生成失败，请稍后重试'
-    if (typeof data === 'object' && data !== null && typeof (data as Record<string, unknown>).message === 'string') {
-      errorMessage = (data as Record<string, unknown>).message as string
-    } else if (typeof data === 'string' && data) {
-      errorMessage = data
-    }
+  let createdRun
+  try {
+    // 先 POST 创建运行，再用 runId 建立 SSE；提示词不会进入 URL。
+    createdRun = await createGeneration({
+      appId,
+      userMessage: prompt,
+      codeGenType: type,
+      executionMode: mode,
+    })
+    activeRunId.value = createdRun.runId
+    runStatus.value = createdRun.status
+    sessionStorage.setItem(activeRunStorageKey.value, createdRun.runId)
+  } catch (error) {
+    const errorMessage = getErrorMessage(error, '创建生成任务失败')
+    messages.value[aiMsgIndex]!.loading = false
+    messages.value[aiMsgIndex]!.content = `[生成失败：${errorMessage}]`
     workflowFailed.value = true
     workflowError.value = errorMessage
     lastFailedPrompt.value = prompt
-    if (messages.value[aiMsgIndex]?.loading) {
-      messages.value[aiMsgIndex]!.loading = false
-    }
-    appendToAiMessage(aiMsgIndex, `\n[生成失败：${errorMessage}]`)
-    scrollToBottom()
-  })
+    runStatus.value = 'FAILED'
+    settlingRun.value = false
+    message.error(errorMessage)
+    return
+  }
 
-  eventSource.addEventListener('done', async () => {
-    if (deployTimeoutTimer) clearTimeout(deployTimeoutTimer);
-    messages.value[aiMsgIndex]!.loading = false
-    eventSource.close()
+  openRunStream(createdRun.runId, aiMsgIndex, prompt)
+}
 
-    if (app.value && !workflowFailed.value) {
-      const loadingMsg = codeGenType.value === 'vue_project'
-        ? '生成完毕，正在自动部署中（Vue项目构建可能需要数分钟），请耐心等待...'
-        : '生成完毕，正在自动部署中...'
-      await deployCurrentApp(loadingMsg)
-    }
-  })
-
-  // EventSource 'error' events do not provide data payload; rely on onerror handler below
-
-  eventSource.onerror = (event) => {
-    if (deployTimeoutTimer) clearTimeout(deployTimeoutTimer);
-    console.error('SSE Error', event)
-    eventSource.close()
-    if (messages.value[aiMsgIndex]!.loading) {
-        messages.value[aiMsgIndex]!.loading = false
-        if (!workflowFailed.value) {
-          messages.value[aiMsgIndex]!.content += '\n[生成出错或连接中断]'
-          workflowFailed.value = true
-          workflowError.value = '生成出错或连接中断'
-          lastFailedPrompt.value = prompt
-        }
-    }
-    // 出错也尝试刷新历史记录，捕获后端已保存的错误信息
-    loadHistory(false)
-
-    // 连接中断时不强制部署，避免部署不完整的代码
-    // 只有在超时的情况下（上面的 setTimeout）才尝试强制部署
+const cancelCurrentGeneration = async () => {
+  if (!activeRunId.value || !canCancelGeneration.value || cancellingRun.value) return
+  cancellingRun.value = true
+  try {
+    await cancelGeneration(activeRunId.value)
+    message.info('已请求取消生成，正在等待服务端停止当前步骤')
+  } catch (error) {
+    cancellingRun.value = false
+    message.error(getErrorMessage(error, '取消生成失败'))
   }
 }
 
@@ -494,6 +716,31 @@ const retryWithDirectMode = () => {
   if (!lastFailedPrompt.value || isGenerating.value) return
   executionMode.value = 'DIRECT'
   onGenerate(lastFailedPrompt.value, 'DIRECT')
+}
+
+const restoreActiveGeneration = async () => {
+  const savedRunId = sessionStorage.getItem(activeRunStorageKey.value)
+  if (!savedRunId || isGenerating.value) return
+  try {
+    const status = await getGeneration(savedRunId)
+    updateRunStateFromEvent(JSON.stringify(status))
+    lastExecutionMode.value = status.executionMode
+    runCurrentStep.value = status.currentStep || '处理中'
+    if (status.status !== 'PENDING' && status.status !== 'RUNNING') {
+      await finishRun(savedRunId, status.status, status.errorMessage || '', -1)
+      return
+    }
+
+    const aiMsgIndex = messages.value.push({ role: 'ai', content: '', loading: true }) - 1
+    settlingRun.value = false
+    openRunStream(savedRunId, aiMsgIndex, '', false)
+  } catch (error) {
+    reconnecting.value = true
+    if (error) console.warn('恢复生成任务状态失败', error)
+    const recoveryIndex = messages.value.push({ role: 'ai', content: '', loading: true }) - 1
+    aiMsgIndexRef.value = recoveryIndex
+    scheduleRunReconnect(savedRunId, recoveryIndex, '')
+  }
 }
 
 const refreshPreview = () => {
@@ -597,6 +844,7 @@ const onSendMessage = () => {
 onMounted(async () => {
   await loadAppInfo()
   await loadHistory(false)
+  await restoreActiveGeneration()
 
   const initPrompt = route.query.initPrompt
     ? decodeURIComponent(route.query.initPrompt as string)
@@ -715,6 +963,23 @@ const onIframeLoad = () => {
               {{ workflowError || '工作流执行失败' }}
               <a-button type="link" size="small" @click="retryWithDirectMode">以快速生成重试</a-button>
             </div>
+          </div>
+          <div v-if="runStatus" class="run-status-card">
+            <span>模式：{{ lastExecutionMode }}</span>
+            <span>状态：{{ runStatusLabel }}</span>
+            <span>步骤：{{ runCurrentStep || '处理中' }}</span>
+            <span>重试：{{ runRetryCount }}/{{ runMaxRetryCount }}</span>
+            <span v-if="reconnecting" class="run-reconnecting">连接恢复中（第 {{ reconnectAttempt }}/{{ MAX_RECONNECT_ATTEMPTS }} 次）</span>
+            <span v-if="activeRunId" class="run-id">runId：{{ activeRunId }}</span>
+            <a-button
+              v-if="canCancelGeneration"
+              danger
+              size="small"
+              :loading="cancellingRun"
+              @click="cancelCurrentGeneration"
+            >
+              取消生成
+            </a-button>
           </div>
           <div class="input-controls">
             <a-button
@@ -838,6 +1103,24 @@ const onIframeLoad = () => {
     background: #f5f9ff;
     color: #44546a;
     font-size: 12px;
+}
+.run-status-card {
+    width: 100%;
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    border: 1px solid #e6e6e6;
+    border-radius: 6px;
+    background: #fafafa;
+    color: #595959;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.run-id {
+    color: #8c8c8c;
+    font-family: monospace;
 }
 .workflow-status-title {
     margin-bottom: 6px;

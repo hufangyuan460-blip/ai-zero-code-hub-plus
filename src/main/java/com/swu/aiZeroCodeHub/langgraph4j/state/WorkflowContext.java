@@ -4,8 +4,12 @@ import com.swu.aiZeroCodeHub.langgraph4j.model.ImageCollectionPlan;
 import com.swu.aiZeroCodeHub.langgraph4j.model.ImageResource;
 import com.swu.aiZeroCodeHub.langgraph4j.model.QualityResult;
 import com.swu.aiZeroCodeHub.generation.GenerationEvent;
+import com.swu.aiZeroCodeHub.generation.GenerationCancelledException;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.model.enums.ExecutionModeEnum;
+import com.swu.aiZeroCodeHub.validation.ValidationReport;
+import com.swu.aiZeroCodeHub.exception.BusinessException;
+import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -16,6 +20,8 @@ import java.io.Serial;
 import java.io.Serializable;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 /**
@@ -52,7 +58,11 @@ public class WorkflowContext implements Serializable {
     private Integer repairAttempt = 0;
     @Builder.Default
     private Integer maxRepairAttempts = 2;
-    private String requestId;
+    private String runId;
+    @Builder.Default
+    private Integer retryCount = 0;
+    @Builder.Default
+    private Integer maxRetryCount = 2;
 
     /**
      * 用户原始输入的提示词
@@ -88,6 +98,20 @@ public class WorkflowContext implements Serializable {
      * 质量检查结果
      */
     private QualityResult qualityResult;
+    private Boolean qualityFailureRepairable;
+
+    /** 确定性验证和运行预算状态，不保存完整源码或工具参数。 */
+    private ValidationReport validationReport;
+    private String validationFingerprint;
+    @Builder.Default
+    private Set<String> seenFingerprints = Set.of();
+    private String artifactHash;
+    @Builder.Default
+    private List<String> changedFiles = List.of();
+    @Builder.Default
+    private Integer llmCallCount = 0;
+    @Builder.Default
+    private Integer toolCallCount = 0;
 
     /**
      * 错误信息
@@ -103,6 +127,13 @@ public class WorkflowContext implements Serializable {
      * 仅用于本次执行期间向 Flux 发布结构化事件，不参与工作流持久化。
      */
     private transient Consumer<GenerationEvent> eventPublisher;
+
+    /**
+     * 运行治理回调，不参与工作流状态持久化。
+     */
+    private transient BooleanSupplier cancellationChecker;
+    private transient BooleanSupplier llmBudgetChecker;
+    private transient BooleanSupplier toolBudgetChecker;
 
     /**
      * 图片收集计划
@@ -139,6 +170,30 @@ public class WorkflowContext implements Serializable {
     public void publishEvent(GenerationEvent event) {
         if (eventPublisher != null && event != null) {
             eventPublisher.accept(event);
+        }
+    }
+
+    public boolean isCancellationRequested() {
+        return cancellationChecker != null && cancellationChecker.getAsBoolean();
+    }
+
+    public void throwIfCancellationRequested() {
+        if (isCancellationRequested()) {
+            throw new GenerationCancelledException();
+        }
+    }
+
+    public void checkLlmBudget() {
+        throwIfCancellationRequested();
+        if (llmBudgetChecker != null && !llmBudgetChecker.getAsBoolean()) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "模型调用预算已用尽");
+        }
+    }
+
+    public void checkToolBudget() {
+        throwIfCancellationRequested();
+        if (toolBudgetChecker != null && !toolBudgetChecker.getAsBoolean()) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "工具调用预算已用尽");
         }
     }
 }

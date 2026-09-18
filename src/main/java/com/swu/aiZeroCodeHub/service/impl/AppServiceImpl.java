@@ -19,21 +19,28 @@ import com.swu.aiZeroCodeHub.exception.ThrowUtils;
 import com.swu.aiZeroCodeHub.generation.GenerationDispatcher;
 import com.swu.aiZeroCodeHub.generation.GenerationEvent;
 import com.swu.aiZeroCodeHub.generation.GenerationRequest;
+import com.swu.aiZeroCodeHub.generation.GenerationRunProperties;
+import com.swu.aiZeroCodeHub.generation.GenerationRunState;
 import com.swu.aiZeroCodeHub.model.dto.app.AppAdminQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppAdminUpdateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppCreateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppFeaturedQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppMyQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
+import com.swu.aiZeroCodeHub.model.dto.generation.GenerationCreateRequest;
 import com.swu.aiZeroCodeHub.model.entity.App;
 import com.swu.aiZeroCodeHub.mapper.AppMapper;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.model.enums.ExecutionModeEnum;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
+import com.swu.aiZeroCodeHub.model.vo.generation.GenerationCreateVO;
 import com.swu.aiZeroCodeHub.service.AppService;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import com.swu.aiZeroCodeHub.service.UserService;
+import com.swu.aiZeroCodeHub.service.GenerationRunStateService;
+import com.swu.aiZeroCodeHub.service.GenerationAppLockService;
+import com.swu.aiZeroCodeHub.service.ArtifactBackupService;
 import com.swu.aiZeroCodeHub.config.AiCodeGeneratorServiceFactory;
 import dev.langchain4j.community.store.memory.chat.redis.RedisChatMemoryStore;
 import jakarta.annotation.Resource;
@@ -90,6 +97,14 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     private AiCodeGeneratorServiceFactory aiCodeGeneratorServiceFactory;
     @Resource
     private GenerationDispatcher generationDispatcher;
+    @Resource
+    private GenerationRunStateService generationRunStateService;
+    @Resource
+    private GenerationRunProperties generationRunProperties;
+    @Resource
+    private GenerationAppLockService generationAppLockService;
+    @Resource
+    private ArtifactBackupService artifactBackupService;
     @Autowired
     private VueProjectBuilder vueProjectBuilder;
     @Resource
@@ -508,54 +523,155 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
     @Override
     public Flux<GenerationEvent> chatToGenCode(Long appId, String message, String codeGenType,
                                                String executionMode, User loginUser) {
-        //参数校验
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0, ErrorCode.PARAM_ERROR, "应用ID不能为空");
-        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(message), ErrorCode.PARAM_ERROR, "用户提示词不能为空");
-        // 必须在保存用户历史、创建异步流和调用 LLM 之前完成校验。
+        GenerationCreateRequest createRequest = new GenerationCreateRequest();
+        createRequest.setAppId(appId);
+        createRequest.setUserMessage(message);
+        createRequest.setCodeGenType(codeGenType);
+        createRequest.setExecutionMode(executionMode);
+        return prepareGeneration(createRequest, loginUser).events();
+    }
+
+    @Override
+    public GenerationCreateVO createGeneration(GenerationCreateRequest request, User loginUser) {
+        PreparedGeneration prepared = prepareGeneration(request, loginUser);
+        return new GenerationCreateVO(prepared.request().runId(), "PENDING");
+    }
+
+    @Override
+    public Flux<GenerationEvent> subscribeGeneration(String runId, User loginUser) {
+        return subscribeGeneration(runId, loginUser, 0L);
+    }
+
+    @Override
+    public Flux<GenerationEvent> subscribeGeneration(String runId, User loginUser, long afterSequence) {
+        GenerationRunState state = getAuthorizedRunState(runId, loginUser);
+        return generationDispatcher.subscribe(state.runId(), Math.max(0L, afterSequence));
+    }
+
+    @Override
+    public GenerationRunState getGenerationStatus(String runId, User loginUser) {
+        return getAuthorizedRunState(runId, loginUser);
+    }
+
+    private PreparedGeneration prepareGeneration(GenerationCreateRequest request, User loginUser) {
+        ThrowUtils.throwExceptionByConditionAndErrorCode(request == null, ErrorCode.PARAM_ERROR);
+        Long appId = request.getAppId();
+        String message = request.getUserMessage();
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(appId == null || appId <= 0,
+                ErrorCode.PARAM_ERROR, "应用ID不能为空");
+        ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(StrUtil.isBlank(message),
+                ErrorCode.PARAM_ERROR, "用户提示词不能为空");
         ChatHistoryService.validateUserMessageLength(message);
         ThrowUtils.throwExceptionByConditionAndErrorCode(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
 
-        //查询应用信息
         App app = this.getById(appId);
         ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(app == null, ErrorCode.NOT_FOUND_ERROR, "应用不存在");
         if (app.getUserId() == null || !app.getUserId().equals(loginUser.getId())) {
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限访问该应用");
         }
 
-        ExecutionModeEnum mode = ExecutionModeEnum.parse(executionMode);
-
-        //获取应用代码生成类型：优先使用参数传入的类型，如果为空则使用应用配置的类型
-        String type = StrUtil.isNotBlank(codeGenType) ? codeGenType : app.getCodeGenType();
+        ExecutionModeEnum mode = ExecutionModeEnum.parse(request.getExecutionMode());
+        String type = StrUtil.isNotBlank(request.getCodeGenType()) ? request.getCodeGenType() : app.getCodeGenType();
         CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(type);
         if (StrUtil.isNotBlank(type) && codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.PARAM_ERROR, "codeGenType 错误");
         }
-        if (codeGenTypeEnum == null && mode == ExecutionModeEnum.DIRECT) {
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "不支持的代码生成类型");
+        if (codeGenTypeEnum == null) {
+            throw new BusinessException(ErrorCode.PARAM_ERROR,
+                    "codeGenType 必须明确指定，请选择 HTML、多文件或 Vue 项目模式");
         }
-        if (StrUtil.isNotBlank(codeGenType) && !codeGenType.equals(app.getCodeGenType())) {
+        if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT
+                && (vueProjectBuilder == null || !vueProjectBuilder.isBuildCapabilityAvailable())) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR,
+                    "Vue 构建能力未配置，请配置远程隔离构建服务或切换到 HTML/多文件模式");
+        }
+
+        if (StrUtil.isNotBlank(request.getCodeGenType()) && !request.getCodeGenType().equals(app.getCodeGenType())) {
             App updateApp = new App();
             updateApp.setId(appId);
-            updateApp.setCodeGenType(codeGenType);
+            updateApp.setCodeGenType(request.getCodeGenType());
             updateApp.setEditTime(LocalDateTime.now());
             this.updateById(updateApp);
-            app.setCodeGenType(codeGenType);
         }
 
-        // 1. 保存用户消息
-        saveChatHistory(appId, message, ChatHistoryMessageTypeEnum.USER, loginUser);
-
-        // 2. 构造已完成鉴权和参数校验的请求，再统一分发执行策略。
         GenerationRequest generationRequest = new GenerationRequest(
-                appId,
-                loginUser.getId(),
-                message,
-                codeGenTypeEnum,
-                mode,
-                loginUser,
-                null
-        );
-        return generationDispatcher.generate(generationRequest);
+                appId, loginUser.getId(), message, codeGenTypeEnum, mode, loginUser, null);
+        boolean lockAcquired = generationAppLockService == null
+                || generationAppLockService.acquire(appId, generationRequest.runId());
+        if (!lockAcquired) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "该应用已有生成任务正在运行");
+        }
+
+        boolean stateCreated = false;
+        boolean generationStarted = false;
+        try {
+            if (artifactBackupService != null) {
+                artifactBackupService.prepare(appId, generationRequest.runId());
+            }
+            // 新任务必须先成功写入用户历史，再创建 Redis 状态并启动 Agent。
+            saveChatHistoryStrict(appId, message, ChatHistoryMessageTypeEnum.USER, loginUser);
+            int maxRetry = generationRunProperties == null ? 2 : generationRunProperties.effectiveMaxRetryCount();
+            int maxRepair = generationRunProperties == null ? 1 : generationRunProperties.effectiveMaxRepairAttempts();
+            // 保留两参数调用的兼容性；其默认的 maxRepairAttempts 已固定为 1。
+            if (maxRepair == 1) {
+                generationRunStateService.create(generationRequest, maxRetry);
+            } else {
+                generationRunStateService.create(generationRequest, maxRetry, maxRepair);
+            }
+            stateCreated = true;
+            Flux<GenerationEvent> events = generationDispatcher.generate(generationRequest);
+            generationStarted = true;
+            return new PreparedGeneration(generationRequest, events);
+        } catch (Throwable error) {
+            if (stateCreated) {
+                try {
+                    generationRunStateService.transitionToRunning(generationRequest.runId(), "启动失败");
+                    generationRunStateService.finish(generationRequest.runId(),
+                            com.swu.aiZeroCodeHub.generation.GenerationRunStatus.FAILED, "生成任务启动失败");
+                } catch (Exception ignored) {
+                    log.warn("生成任务启动失败且状态无法收敛，runId={}, appId={}, mode={}, step={}",
+                            generationRequest.runId(), appId, mode, "启动");
+                }
+            }
+            throw error;
+        } finally {
+            if (generationAppLockService != null && (!stateCreated || !generationStarted)) {
+                generationAppLockService.release(appId, generationRequest.runId());
+            }
+        }
+    }
+
+    private GenerationRunState getAuthorizedRunState(String runId, User loginUser) {
+        GenerationRunState state = generationRunStateService.getRequired(runId);
+        boolean admin = loginUser != null && UserConstant.ADMIN_ROLE.equals(loginUser.getUserRole());
+        boolean owner = loginUser != null && loginUser.getId() != null
+                && loginUser.getId().equals(state.userId());
+        if (!admin && !owner) {
+            throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限访问该生成任务");
+        }
+        return state;
+    }
+
+    @Override
+    public boolean cancelGeneration(String runId, User loginUser) {
+        // Redis 状态中的 appId 与 userId 是取消权限的依据；应用仍存在且归属未改变时才允许普通用户继续。
+        generationRunStateService.find(runId).ifPresent(state -> {
+            App app = this.getById(state.appId());
+            boolean admin = loginUser != null && UserConstant.ADMIN_ROLE.equals(loginUser.getUserRole());
+            boolean owner = loginUser != null && loginUser.getId() != null
+                    && loginUser.getId().equals(state.userId())
+                    && app != null && loginUser.getId().equals(app.getUserId());
+            if (!admin && !owner) {
+                throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限取消该生成任务");
+            }
+        });
+        GenerationRunStateService.CancelResult result = generationRunStateService.requestCancel(runId, loginUser);
+        return switch (result) {
+            case REQUESTED -> true;
+            case NOT_FOUND -> throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "生成任务不存在");
+            case FORBIDDEN -> throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限取消该生成任务");
+            case NOT_ACTIVE -> throw new BusinessException(ErrorCode.OPERATION_ERROR, "生成任务已结束，无法取消");
+        };
     }
 
 
@@ -577,6 +693,18 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         } catch (Exception e) {
             log.error("保存对话历史失败: appId={}, type={}, error={}", appId, messageTypeEnum.getText(), e.getMessage());
         }
+    }
+
+    private void saveChatHistoryStrict(Long appId, String content,
+                                       ChatHistoryMessageTypeEnum messageTypeEnum, User loginUser) {
+        ChatHistoryAddRequest addRequest = new ChatHistoryAddRequest();
+        addRequest.setAppId(appId);
+        addRequest.setContent(content);
+        addRequest.setMessageType(messageTypeEnum.getValue());
+        chatHistoryService.addChatHistory(addRequest, loginUser);
+    }
+
+    private record PreparedGeneration(GenerationRequest request, Flux<GenerationEvent> events) {
     }
 
 
@@ -616,9 +744,17 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App>  implements AppS
         // 7. Vue项目特殊处理：执行构建
         CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(codeGenType);
         if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
-            // Vue项目需要构建
-            boolean buildSuccess = vueProjectBuilder.buildProject(sourceDirPath);
-            ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!buildSuccess, ErrorCode.SYSTEM_ERROR, "Vue项目构建失败，请检查代码和依赖");
+            if (vueProjectBuilder == null || !vueProjectBuilder.isBuildCapabilityAvailable()) {
+                throw new BusinessException(ErrorCode.OPERATION_ERROR,
+                        "Vue 构建能力未配置，请配置远程隔离构建服务后再部署");
+            }
+            // 工作流已完成一次构建并产出 dist 时直接复用，避免部署再次执行 npm。
+            File existingDist = new File(sourceDirPath, "dist");
+            if (!existingDist.isDirectory()) {
+                boolean buildSuccess = vueProjectBuilder.buildProject(sourceDirPath);
+                ThrowUtils.throwExceptionByConditionAndErrorCodeAndMessage(!buildSuccess,
+                        ErrorCode.SYSTEM_ERROR, "Vue项目构建失败，请检查代码和依赖");
+            }
 
             // 检查dist目录是否存在
             File distDir = new File(sourceDirPath, "dist");

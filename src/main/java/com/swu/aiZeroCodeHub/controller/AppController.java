@@ -14,12 +14,15 @@ import com.swu.aiZeroCodeHub.exception.BusinessException;
 import com.swu.aiZeroCodeHub.exception.ErrorCode;
 import com.swu.aiZeroCodeHub.exception.ThrowUtils;
 import com.swu.aiZeroCodeHub.generation.GenerationEvent;
+import com.swu.aiZeroCodeHub.generation.GenerationRunProperties;
+import com.swu.aiZeroCodeHub.generation.GenerationRunState;
 import com.swu.aiZeroCodeHub.model.dto.app.AppAdminQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppAdminUpdateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppCreateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppFeaturedQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppMyQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
+import com.swu.aiZeroCodeHub.model.dto.generation.GenerationCreateRequest;
 import com.swu.aiZeroCodeHub.model.entity.App;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import com.swu.aiZeroCodeHub.service.ProjectDownloadService;
@@ -28,6 +31,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import com.swu.aiZeroCodeHub.service.AppService;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
+import com.swu.aiZeroCodeHub.model.vo.generation.GenerationCreateVO;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -43,7 +47,6 @@ import org.springframework.http.codec.ServerSentEvent;
 import reactor.core.publisher.Flux;
 import com.swu.aiZeroCodeHub.service.UserService;
 import com.swu.aiZeroCodeHub.model.entity.User;
-import reactor.core.publisher.Mono;
 
 import java.io.File;
 import java.time.LocalDateTime;
@@ -70,9 +73,13 @@ public class AppController {
     private DistributedRateLimiter distributedRateLimiter;
     @Autowired
     private ObjectMapper objectMapper;
+    @Autowired
+    private GenerationRunProperties generationRunProperties;
 
     private static final long CHAT_GENERATE_CODE_RATE = 1;
     private static final long CHAT_GENERATE_CODE_INTERVAL_SECONDS = 5;
+    /** 旧 GET 适配器只允许很短的提示词，避免把完整 prompt 放进 URL。 */
+    private static final int LEGACY_GET_MESSAGE_LIMIT = 2048;
 
     /**
      * 用户创建应用（必须填写 initPrompt）。
@@ -192,21 +199,106 @@ public class AppController {
                                                           @RequestParam(value = "executionMode", required = false) String executionMode,
                                                           HttpServletRequest request) {
         try {
-            User loginUser = userService.getLoginUser(request);
-            String rateKey = "rate:sse:chat:gen:code:user:" + loginUser.getId();
-            boolean acquired = distributedRateLimiter.tryAcquire(rateKey, CHAT_GENERATE_CODE_RATE, CHAT_GENERATE_CODE_INTERVAL_SECONDS);
-            if (!acquired) {
-                return sseError(new RateLimitException("请求过于频繁，请稍后再试", CHAT_GENERATE_CODE_INTERVAL_SECONDS));
+            if (userMessage != null && userMessage.length() > LEGACY_GET_MESSAGE_LIMIT) {
+                return sseError(new BusinessException(ErrorCode.PARAM_ERROR,
+                        "用户消息不能超过8000个字符；旧版 GET 入口仅支持 2048 个字符，请使用 POST /app/generation"));
             }
+            User loginUser = userService.getLoginUser(request);
+            RateLimitException rateLimitException = tryAcquireGenerationRateLimit(loginUser);
+            if (rateLimitException != null) return sseError(rateLimitException);
             Flux<GenerationEvent> eventFlux = appService.chatToGenCode(
                     appId, userMessage, codeGenType, executionMode, loginUser);
-            Flux<ServerSentEvent<String>> stream = eventFlux.map(this::toSseEvent);
-            ServerSentEvent<String> done = ServerSentEvent.builder("").event("done").build();
-            return stream.concatWith(Mono.just(done))
+            return eventFlux.map(this::toSseEvent)
                     .onErrorResume(this::sseError);
         } catch (Throwable throwable) {
             return sseError(throwable);
         }
+    }
+
+    /**
+     * 创建生成运行。提示词通过 JSON body 传输，runId 始终由服务端生成。
+     */
+    @PostMapping(value = "/generation", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public BaseResponse<GenerationCreateVO> createGeneration(@RequestBody GenerationCreateRequest generationRequest,
+                                                              HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        RateLimitException rateLimitException = tryAcquireGenerationRateLimit(loginUser);
+        if (rateLimitException != null) {
+            throw rateLimitException;
+        }
+        return ResultUtils.success(appService.createGeneration(generationRequest, loginUser));
+    }
+
+    /** GET 兼容入口和 POST 新入口共享同一个用户级生成限流桶。 */
+    private RateLimitException tryAcquireGenerationRateLimit(User loginUser) {
+        // Unit-level legacy callers may construct the controller without Spring wiring;
+        // the production bean is always present.
+        if (distributedRateLimiter == null) {
+            return null;
+        }
+        if (loginUser == null || loginUser.getId() == null) {
+            return new RateLimitException("请求过于频繁，请稍后再试", effectiveRateWindowSeconds());
+        }
+        long window = effectiveRateWindowSeconds();
+        String key = "rate:agent:generation:user:" + loginUser.getId();
+        boolean acquired = distributedRateLimiter.tryAcquire(key, effectiveRate(), window);
+        return acquired ? null : new RateLimitException("请求过于频繁，请稍后再试", window);
+    }
+
+    private long effectiveRate() {
+        return generationRunProperties == null
+                ? CHAT_GENERATE_CODE_RATE : generationRunProperties.effectiveGenerationRate();
+    }
+
+    private long effectiveRateWindowSeconds() {
+        return generationRunProperties == null
+                ? CHAT_GENERATE_CODE_INTERVAL_SECONDS : generationRunProperties.effectiveGenerationRateWindowSeconds();
+    }
+
+    /**
+     * 订阅已创建的生成运行。晚到订阅只回放该 run 的事件，不会重新执行。
+     */
+    @GetMapping(value = "/generation/stream/{runId}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public Flux<ServerSentEvent<String>> streamGeneration(@PathVariable String runId,
+                                                           @RequestParam(value = "afterSequence", required = false) Long afterSequence,
+                                                           HttpServletRequest request) {
+        try {
+            User loginUser = userService.getLoginUser(request);
+            Flux<GenerationEvent> events = afterSequence == null || afterSequence <= 0
+                    ? appService.subscribeGeneration(runId, loginUser)
+                    : appService.subscribeGeneration(runId, loginUser, afterSequence);
+            return events
+                    .map(this::toSseEvent)
+                    .onErrorResume(this::sseError);
+        } catch (Throwable throwable) {
+            return sseError(throwable);
+        }
+    }
+
+    /** 兼容既有 Java 调用方；浏览器重连时使用带 afterSequence 的接口。 */
+    public Flux<ServerSentEvent<String>> streamGeneration(String runId, HttpServletRequest request) {
+        return streamGeneration(runId, null, request);
+    }
+
+    /** 查询生成运行状态，供刷新页面恢复运行信息。 */
+    @GetMapping("/generation/{runId}")
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public BaseResponse<GenerationRunState> getGenerationStatus(@PathVariable String runId,
+                                                                 HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        return ResultUtils.success(appService.getGenerationStatus(runId, loginUser));
+    }
+
+    /**
+     * 协作式取消生成任务。断开 SSE 不会触发该接口。
+     */
+    @PostMapping("/generation/cancel/{runId}")
+    @AuthCheck(mustRole = UserConstant.DEFAULT_ROLE)
+    public BaseResponse<Boolean> cancelGeneration(@PathVariable String runId, HttpServletRequest request) {
+        User loginUser = userService.getLoginUser(request);
+        return ResultUtils.success(appService.cancelGeneration(runId, loginUser));
     }
 
     /**
@@ -226,7 +318,11 @@ public class AppController {
         String data = event.data() instanceof String stringData
                 ? stringData
                 : serializeEventData(event.data());
-        return ServerSentEvent.builder(data).event(event.type()).build();
+        ServerSentEvent.Builder<String> builder = ServerSentEvent.builder(data).event(event.type());
+        if (event.sequence() > 0) {
+            builder.id(String.valueOf(event.sequence()));
+        }
+        return builder.build();
     }
 
     private String serializeEventData(Object data) {
@@ -254,9 +350,9 @@ public class AppController {
             page = "<html><body><h2>请求已拦截</h2><p>检测到不安全的提示词输入，请修改后重试</p></body></html>";
         } else if (throwable instanceof BusinessException businessException) {
             code = businessException.getCode();
-            message = businessException.getMessage();
+            message = safeSseMessage(businessException.getMessage(), "请求处理失败");
         } else if (throwable != null && StrUtil.isNotBlank(throwable.getMessage())) {
-            message = throwable.getMessage();
+            message = safeSseMessage(throwable.getMessage(), "生成失败，请稍后重试");
         }
         String json;
         try {
@@ -266,11 +362,21 @@ public class AppController {
             errorData.put("page", page);
             json = objectMapper.writeValueAsString(errorData);
         } catch (Exception e) {
-            json = "{\"code\":" + code + ",\"message\":\"" + message + "\"}";
+            json = "{\"code\":" + code + ",\"message\":\"请求处理失败\"}";
         }
-        ServerSentEvent<String> error = ServerSentEvent.builder(json).event("error").build();
+        ServerSentEvent<String> error = ServerSentEvent.builder(json).event("generation_error").build();
         ServerSentEvent<String> done = ServerSentEvent.builder("").event("done").build();
         return Flux.just(error, done);
+    }
+
+    private String safeSseMessage(String value, String fallback) {
+        if (StrUtil.isBlank(value)) {
+            return fallback;
+        }
+        String sanitized = value
+                .replaceAll("(?i)(api[_-]?key|token|password|secret)\\s*[:=]\\s*[^,;\\s]+", "$1=***")
+                .replaceAll("[A-Za-z]:\\\\[^\\n\\r]*|/(?:[^\\n\\r ]+/)+[^\\n\\r ]*", "[路径]");
+        return sanitized.length() > 500 ? sanitized.substring(0, 500) : sanitized;
     }
 
     /**

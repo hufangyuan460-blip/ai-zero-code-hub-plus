@@ -16,7 +16,7 @@ public record GenerationRequest(
         CodeGenTypeEnum codeGenType,
         ExecutionModeEnum executionMode,
         User loginUser,
-        String requestId
+        String runId
 ) {
 
     public GenerationRequest(Long appId,
@@ -28,8 +28,8 @@ public record GenerationRequest(
     }
 
     public GenerationRequest {
-        if (requestId == null || requestId.isBlank()) {
-            requestId = UUID.randomUUID().toString();
+        if (runId == null || runId.isBlank()) {
+            runId = UUID.randomUUID().toString();
         }
     }
 }

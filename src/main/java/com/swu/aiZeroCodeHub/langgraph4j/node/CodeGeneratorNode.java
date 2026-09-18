@@ -5,9 +5,12 @@ import com.swu.aiZeroCodeHub.core.AiCodeGeneratorFacade;
 import com.swu.aiZeroCodeHub.core.streamHandler.HistoryContentAccumulator;
 import com.swu.aiZeroCodeHub.core.streamHandler.HistoryContentSanitizer;
 import com.swu.aiZeroCodeHub.generation.GenerationEvent;
+import com.swu.aiZeroCodeHub.generation.GenerationCancelledException;
+import com.swu.aiZeroCodeHub.generation.GenerationTimeoutException;
 import com.swu.aiZeroCodeHub.langgraph4j.WorkflowEventSupport;
 import com.swu.aiZeroCodeHub.langgraph4j.model.QualityResult;
 import com.swu.aiZeroCodeHub.langgraph4j.state.WorkflowContext;
+import com.swu.aiZeroCodeHub.validation.ValidationReport;
 import com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.AsyncNodeAction;
@@ -27,6 +30,8 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 @Slf4j
 public class CodeGeneratorNode {
 
+    private static final Duration DEFAULT_NODE_TIMEOUT = Duration.ofMinutes(10);
+
     /**
      * 兼容旧的示例工作流；正式入口使用带依赖参数的工厂方法。
      */
@@ -35,10 +40,16 @@ public class CodeGeneratorNode {
     }
 
     public static AsyncNodeAction<MessagesState<String>> create(AiCodeGeneratorFacade codeGeneratorFacade) {
+        return create(codeGeneratorFacade, DEFAULT_NODE_TIMEOUT);
+    }
+
+    public static AsyncNodeAction<MessagesState<String>> create(AiCodeGeneratorFacade codeGeneratorFacade,
+                                                                 Duration nodeTimeout) {
         return node_async(state -> {
             WorkflowContext context = WorkflowContext.getContext(state);
+            context.throwIfCancellationRequested();
             WorkflowEventSupport.stepStarted(context, "生成代码");
-            log.info("执行节点: 代码生成，appId={}, requestId={}", context.getAppId(), context.getRequestId());
+            log.info("执行节点: 代码生成，appId={}, runId={}", context.getAppId(), context.getRunId());
 
             String userMessage = buildUserMessage(context);
             CodeGenTypeEnum generationType = context.getGenerationType();
@@ -48,21 +59,35 @@ public class CodeGeneratorNode {
             }
 
             HistoryContentAccumulator historyAccumulator = new HistoryContentAccumulator();
+            context.checkLlmBudget();
+            context.throwIfCancellationRequested();
             Flux<String> codeStream = codeGeneratorFacade.generateAndSaveCodeStream(
                     userMessage, generationType, appId);
-            codeStream.doOnNext(chunk -> {
-                        // 工作流只通过结构化 message 事件向外输出，Controller 负责 SSE 包装。
-                        context.publishEvent(GenerationEvent.message(chunk));
-                        historyAccumulator.append(HistoryContentSanitizer.sanitize(chunk, generationType));
-                    })
-                    .blockLast(Duration.ofMinutes(10));
+            try {
+                codeStream.doOnNext(chunk -> {
+                            context.throwIfCancellationRequested();
+                            // 工作流只通过结构化 message 事件向外输出，Controller 负责 SSE 包装。
+                            context.publishEvent(GenerationEvent.message(chunk));
+                            historyAccumulator.append(HistoryContentSanitizer.sanitize(chunk, generationType));
+                        })
+                        .blockLast(nodeTimeout);
+            } catch (GenerationCancelledException cancellationException) {
+                throw cancellationException;
+            } catch (IllegalStateException timeoutOrStreamError) {
+                if (timeoutOrStreamError.getMessage() != null
+                        && timeoutOrStreamError.getMessage().toLowerCase().contains("timeout")) {
+                    throw new GenerationTimeoutException("代码生成节点超时", timeoutOrStreamError);
+                }
+                throw timeoutOrStreamError;
+            }
+            context.throwIfCancellationRequested();
 
             String generatedCodeDir = buildCodeDirectory(generationType, appId);
             context.setCurrentStep("生成代码");
             context.setGeneratedCodeDir(generatedCodeDir);
             context.setAiHistoryContent(historyAccumulator.content());
             WorkflowEventSupport.stepCompleted(context, "生成代码", "完成");
-            log.info("AI 代码生成完成，appId={}, 目录={}", appId, generatedCodeDir);
+            log.info("AI 代码生成完成，appId={}", appId);
             return WorkflowContext.saveContext(context);
         });
     }
@@ -82,7 +107,10 @@ public class CodeGeneratorNode {
             userMessage = context.getOriginalPrompt();
         }
         QualityResult qualityResult = context.getQualityResult();
-        if (isQualityCheckFailed(qualityResult)) {
+        ValidationReport validationReport = context.getValidationReport();
+        if (validationReport != null && !validationReport.passed()) {
+            userMessage = userMessage + buildValidationFixPrompt(validationReport);
+        } else if (isQualityCheckFailed(qualityResult)) {
             userMessage = userMessage + buildErrorFixPrompt(qualityResult);
         }
         return userMessage;
@@ -106,5 +134,11 @@ public class CodeGeneratorNode {
         }
         return errorInfo.append("\n请根据上述问题和建议重新生成代码，确保修复所有提到的问题。")
                 .toString();
+    }
+
+    private static String buildValidationFixPrompt(ValidationReport report) {
+        String details = report.repairPrompt();
+        return "\n\n## 上次生成的代码未通过确定性验证，请只修复以下问题：\n"
+                + details + "\n请保持改动范围最小，不要重复堆叠历史错误。";
     }
 }

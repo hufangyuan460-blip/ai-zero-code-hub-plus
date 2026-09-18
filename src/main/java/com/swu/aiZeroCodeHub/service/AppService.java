@@ -8,10 +8,13 @@ import com.swu.aiZeroCodeHub.model.dto.app.AppCreateRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppFeaturedQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppMyQueryRequest;
 import com.swu.aiZeroCodeHub.model.dto.app.AppUpdateMyRequest;
+import com.swu.aiZeroCodeHub.model.dto.generation.GenerationCreateRequest;
 import com.swu.aiZeroCodeHub.model.entity.App;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.vo.app.AppVO;
 import com.swu.aiZeroCodeHub.generation.GenerationEvent;
+import com.swu.aiZeroCodeHub.generation.GenerationRunState;
+import com.swu.aiZeroCodeHub.model.vo.generation.GenerationCreateVO;
 import jakarta.servlet.http.HttpServletRequest;
 import reactor.core.publisher.Flux;
 
@@ -59,6 +62,21 @@ public interface AppService extends IService<App> {
      */
     Flux<GenerationEvent> chatToGenCode(Long appId, String message, String codeGenType,
                                         String executionMode, User loginUser);
+
+    /**
+     * 协作式取消指定生成运行。
+     */
+    boolean cancelGeneration(String runId, User loginUser);
+
+    GenerationCreateVO createGeneration(GenerationCreateRequest request, User loginUser);
+
+    Flux<GenerationEvent> subscribeGeneration(String runId, User loginUser);
+
+    default Flux<GenerationEvent> subscribeGeneration(String runId, User loginUser, long afterSequence) {
+        return subscribeGeneration(runId, loginUser);
+    }
+
+    GenerationRunState getGenerationStatus(String runId, User loginUser);
 
     /**
      * 部署AI生成的网页代码

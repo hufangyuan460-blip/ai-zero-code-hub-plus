@@ -226,7 +226,7 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
             return loadedCount;
 
         } catch (Exception e) {
-            log.error("加载历史对话失败，appId: {}, error: {}", appId, e.getMessage(), e);
+            log.error("加载历史对话失败，appId={}, 类型={}", appId, e.getClass().getSimpleName());
             // 加载失败不影响系统运行，只是没有历史上下文
             return 0;
         }

@@ -3,17 +3,27 @@ package com.swu.aiZeroCodeHub.langgraph4j.node;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
 import com.swu.aiZeroCodeHub.langgraph4j.ai.CodeQualityCheckService;
+import com.swu.aiZeroCodeHub.generation.GenerationCancelledException;
+import com.swu.aiZeroCodeHub.generation.GenerationTimeoutException;
 import com.swu.aiZeroCodeHub.langgraph4j.WorkflowEventSupport;
 import com.swu.aiZeroCodeHub.langgraph4j.model.QualityResult;
 import com.swu.aiZeroCodeHub.langgraph4j.state.WorkflowContext;
+import com.swu.aiZeroCodeHub.validation.ValidationReport;
+import com.swu.aiZeroCodeHub.validation.ValidationService;
+import com.swu.aiZeroCodeHub.service.GenerationRunStateService;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.AsyncNodeAction;
 import org.bsc.langgraph4j.prebuilt.MessagesState;
 import com.swu.aiZeroCodeHub.utils.SpringContextUtil;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 
@@ -24,6 +34,7 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 public class CodeQualityCheckNode {
 
     private static final int MAX_QUALITY_INPUT_LENGTH = 12_000;
+    private static final Duration DEFAULT_NODE_TIMEOUT = Duration.ofMinutes(10);
 
     /** 兼容旧的示例工作流；正式入口使用带依赖参数的工厂方法。 */
     public static AsyncNodeAction<MessagesState<String>> create() {
@@ -31,8 +42,14 @@ public class CodeQualityCheckNode {
     }
 
     public static AsyncNodeAction<MessagesState<String>> create(CodeQualityCheckService qualityCheckService) {
+        return create(qualityCheckService, DEFAULT_NODE_TIMEOUT);
+    }
+
+    public static AsyncNodeAction<MessagesState<String>> create(CodeQualityCheckService qualityCheckService,
+                                                                 Duration nodeTimeout) {
         return node_async(state -> {
             WorkflowContext context = WorkflowContext.getContext(state);
+            context.throwIfCancellationRequested();
             log.info("执行节点: 代码质量检查");
             WorkflowEventSupport.stepStarted(context, "代码质量检查");
             String generatedCodeDir = context.getGeneratedCodeDir();
@@ -47,18 +64,31 @@ public class CodeQualityCheckNode {
                             .errors(List.of("未找到可检查的代码文件"))
                             .suggestions(List.of("请确保代码生成成功"))
                             .build();
+                    context.setQualityFailureRepairable(false);
                 } else {
                     // 2. 调用 AI 进行代码质量检查
-                    qualityResult = qualityCheckService.checkCodeQuality(codeContent);
+                    context.throwIfCancellationRequested();
+                    qualityResult = CompletableFuture.supplyAsync(() -> {
+                                context.throwIfCancellationRequested();
+                                return qualityCheckService.checkCodeQuality(codeContent);
+                            })
+                            .get(nodeTimeout.toMillis(), TimeUnit.MILLISECONDS);
+                    context.setQualityFailureRepairable(qualityResult != null
+                            && Boolean.FALSE.equals(qualityResult.getIsValid())
+                            && qualityResult.getErrors() != null
+                            && !qualityResult.getErrors().isEmpty());
                     log.info("代码质量检查完成 - 是否通过: {}", qualityResult.getIsValid());
                 }
             } catch (Exception e) {
-                log.error("代码质量检查异常: {}", e.getMessage(), e);
-                qualityResult = QualityResult.builder()
-                        .isValid(false)
-                        .errors(List.of("代码质量检查失败，请稍后重试"))
-                        .suggestions(List.of("确认项目文件完整后重新生成"))
-                        .build();
+                Throwable cause = rootCause(e);
+                if (cause instanceof GenerationCancelledException cancellationException) {
+                    throw cancellationException;
+                }
+                if (cause instanceof TimeoutException) {
+                    throw new GenerationTimeoutException("代码质量检查节点超时", cause);
+                }
+                log.error("代码质量检查异常，类型={}", e.getClass().getSimpleName());
+                throw new IllegalStateException("代码质量检查失败，请稍后重试", cause);
             }
             // 3. 更新状态
             context.setCurrentStep("代码质量检查");
@@ -67,6 +97,69 @@ public class CodeQualityCheckNode {
             WorkflowEventSupport.stepCompleted(context, "代码质量检查", status);
             return WorkflowContext.saveContext(context);
         });
+    }
+
+    /**
+     * 默认生产路径：先做确定性检查，不把完整源码发送给质检模型。
+     */
+    public static AsyncNodeAction<MessagesState<String>> create(ValidationService validationService,
+                                                                  Duration nodeTimeout) {
+        return create(validationService, null, nodeTimeout);
+    }
+
+    public static AsyncNodeAction<MessagesState<String>> create(ValidationService validationService,
+                                                                  GenerationRunStateService runStateService,
+                                                                  Duration nodeTimeout) {
+        return node_async(state -> {
+            WorkflowContext context = WorkflowContext.getContext(state);
+            context.throwIfCancellationRequested();
+            WorkflowEventSupport.stepStarted(context, "确定性验证");
+            ValidationReport report;
+            try {
+                report = validationService.validate(
+                        StrUtil.isBlank(context.getGeneratedCodeDir())
+                                ? null : Path.of(context.getGeneratedCodeDir()),
+                        context.getGenerationType());
+            } catch (Exception e) {
+                log.warn("确定性验证异常: {}", e.getMessage());
+                throw new IllegalStateException("确定性验证失败，请稍后重试", e);
+            }
+            context.setValidationReport(report);
+            context.setValidationFingerprint(report.fingerprint());
+            context.setArtifactHash(report.artifactHash());
+            context.setChangedFiles(report.affectedFiles());
+            context.setQualityFailureRepairable(report.repairable());
+            context.setQualityResult(toQualityResult(report));
+            if (runStateService != null && context.getRunId() != null) {
+                runStateService.updateValidation(context.getRunId(), report.fingerprint(), report.artifactHash(),
+                        report.affectedFiles(), report.issues().size());
+            }
+            context.setCurrentStep("确定性验证");
+            WorkflowEventSupport.stepCompleted(context, "确定性验证", report.summary());
+            return WorkflowContext.saveContext(context);
+        });
+    }
+
+    public static QualityResult toQualityResultForBuild(ValidationReport report) {
+        return toQualityResult(report);
+    }
+
+    private static QualityResult toQualityResult(ValidationReport report) {
+        return QualityResult.builder()
+                .isValid(report.passed())
+                .errors(report.issues().stream().map(issue -> issue.message()).toList())
+                .suggestions(report.issues().stream().filter(issue -> issue.repairable())
+                        .map(issue -> "请修复 " + (issue.filePath() == null ? "相关文件" : issue.filePath()))
+                        .toList())
+                .build();
+    }
+
+    private static Throwable rootCause(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        return cause;
     }
 
     /**
@@ -85,7 +178,7 @@ public class CodeQualityCheckNode {
         }
         File directory = new File(codeDir);
         if (!directory.exists() || !directory.isDirectory()) {
-            log.error("代码目录不存在或不是目录: {}", codeDir);
+            log.error("代码目录不存在或不是目录");
             return "";
         }
         StringBuilder codeContent = new StringBuilder();

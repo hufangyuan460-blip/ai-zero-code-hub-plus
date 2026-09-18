@@ -92,9 +92,9 @@ public class AiCodeGeneratorFacade {
                         String completeHtmlCode = codeBuilder.toString();
                         CodeResult codeResult = codeParserExecutor.parse(completeHtmlCode, CodeGenTypeEnum.HTML);
                         File savedDir = codeFileSaverExecutor.save(codeResult, CodeGenTypeEnum.HTML,appId);
-                        log.info("保存成功，路径为：{}",savedDir.getAbsolutePath());
+                        log.info("保存代码成功，appId={}, type=HTML", appId);
                     }catch (Exception e){
-                        log.error("保存失败：{}",e.getMessage());
+                        log.error("保存 HTML 代码失败，类型={}", e.getClass().getSimpleName());
                     }
                 });
     }
@@ -117,10 +117,10 @@ public class AiCodeGeneratorFacade {
                         String completeMultiFileCode = codeBuilder.toString();
                         CodeResult codeResult = codeParserExecutor.parse(completeMultiFileCode, CodeGenTypeEnum.MULTI_FILE);
                         File savedDir = codeFileSaverExecutor.save(codeResult, CodeGenTypeEnum.MULTI_FILE,appId);
-                        log.info("保存成功，路径为：{}",savedDir.getAbsolutePath());
+                        log.info("保存代码成功，appId={}, type=MULTI_FILE", appId);
 
                     }catch (Exception e){
-                        log.error("保存失败：{}",e.getMessage());
+                        log.error("保存多文件代码失败，类型={}", e.getClass().getSimpleName());
                     }
                 });
     }
@@ -138,6 +138,9 @@ public class AiCodeGeneratorFacade {
         String projectDirName = "vue_project_" + appId;
         Path projectRoot = Paths.get(AppConstant.CODE_OUTPUT_ROOT_DIR, projectDirName).toAbsolutePath().normalize();
         Path packageJsonPath = projectRoot.resolve("package.json");
+        // A new Vue run must not let deployment reuse a previous build. The workflow
+        // build node will recreate dist once; direct mode will build it during deploy.
+        clearPreviousBuildOutput(projectRoot);
         
         TokenStream tokenStream;
         
@@ -164,8 +167,23 @@ public class AiCodeGeneratorFacade {
                     log.info("Vue 项目生成完成，appId: {}, 总输出长度: {}", appId, contentBuilder.length());
                 })
                 .doOnError(e -> {
-                    log.error("Vue 项目生成失败，appId: {}, error: {}", appId, e.getMessage(), e);
+                    log.error("Vue 项目生成失败，appId={}, 类型={}", appId, e.getClass().getSimpleName());
                 });
+    }
+
+    private void clearPreviousBuildOutput(Path projectRoot) {
+        Path dist = projectRoot.resolve("dist").normalize();
+        if (!dist.startsWith(projectRoot) || !Files.exists(dist)) {
+            return;
+        }
+        try (var paths = Files.walk(dist)) {
+            for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(path);
+            }
+        } catch (Exception e) {
+            log.warn("清理旧 Vue 构建产物失败，类型={}", e.getClass().getSimpleName());
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "无法准备 Vue 构建目录，请稍后重试");
+        }
     }
 
 
@@ -193,7 +211,7 @@ public class AiCodeGeneratorFacade {
                         sink.complete();
                     })
                     .onError((Throwable error) -> {
-                        error.printStackTrace();
+                        log.error("模型流处理失败，类型={}", error.getClass().getSimpleName());
                         sink.error(error);
                     })
                     .start();

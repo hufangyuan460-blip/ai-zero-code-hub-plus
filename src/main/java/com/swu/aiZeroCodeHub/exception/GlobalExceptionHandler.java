@@ -2,6 +2,7 @@ package com.swu.aiZeroCodeHub.exception;
 
 import com.swu.aiZeroCodeHub.common.ResultUtils;
 import com.swu.aiZeroCodeHub.common.vo.BaseResponse;
+import com.swu.aiZeroCodeHub.core.ratelimit.RateLimitException;
 import io.swagger.v3.oas.annotations.Hidden;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -16,6 +17,10 @@ public class GlobalExceptionHandler {
     public BaseResponse<?> businessExceptionHandler(BusinessException e) {
         log.error("BusinessException", e);
         return ResultUtils.error(e.getCode(), e.getMessage());
+    }
+    @ExceptionHandler(RateLimitException.class)
+    public BaseResponse<?> rateLimitExceptionHandler(RateLimitException e) {
+        return ResultUtils.error(ErrorCode.RATE_LIMIT_ERROR, e.getMessage());
     }
     //系统异常
     @ExceptionHandler(RuntimeException.class)

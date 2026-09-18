@@ -4,10 +4,13 @@ import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryAddRequest;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.model.enums.ChatHistoryMessageTypeEnum;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
+import com.swu.aiZeroCodeHub.generation.GenerationCancelledException;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+
+import java.util.function.BooleanSupplier;
 
 /**
  * 简单文本流处理器
@@ -29,9 +32,27 @@ public class SimpleTextStreamHandler {
      * @return 处理后的流
      */
     public Flux<String> handle(Flux<String> originFlux, ChatHistoryService chatHistoryService, long appId, User loginUser) {
+        return handle(originFlux, chatHistoryService, appId, loginUser, () -> false);
+    }
+
+    public Flux<String> handle(Flux<String> originFlux,
+                               ChatHistoryService chatHistoryService,
+                               long appId,
+                               User loginUser,
+                               BooleanSupplier cancellationChecker) {
+        return handle(originFlux, chatHistoryService, appId, loginUser, cancellationChecker, () -> true);
+    }
+
+    public Flux<String> handle(Flux<String> originFlux,
+                               ChatHistoryService chatHistoryService,
+                               long appId,
+                               User loginUser,
+                               BooleanSupplier cancellationChecker,
+                               BooleanSupplier toolBudgetChecker) {
         StringBuilder aiResponseBuilder = new StringBuilder();
         boolean[] aiResponseTooLong = {false};
         return originFlux.map(chunk -> {
+                    throwIfCancelled(cancellationChecker);
                     // 收集AI响应内容
                     appendHistoryContent(aiResponseBuilder, chunk, aiResponseTooLong);
                     return chunk;
@@ -44,10 +65,19 @@ public class SimpleTextStreamHandler {
                     saveChatHistory(appId, aiResponse, ChatHistoryMessageTypeEnum.AI, loginUser, chatHistoryService);
                 })
                 .doOnError(error -> {
+                    if (error instanceof GenerationCancelledException) {
+                        return;
+                    }
                     // 如果AI回复失败，也要记录错误消息
                     String errorMessage = "AI回复失败: " + error.getMessage();
                     saveChatHistory(appId, errorMessage, ChatHistoryMessageTypeEnum.AI, loginUser,chatHistoryService);
                 });
+    }
+
+    private void throwIfCancelled(BooleanSupplier cancellationChecker) {
+        if (cancellationChecker != null && cancellationChecker.getAsBoolean()) {
+            throw new com.swu.aiZeroCodeHub.generation.GenerationCancelledException();
+        }
     }
 
     private void appendHistoryContent(StringBuilder builder, String chunk, boolean[] tooLong) {
@@ -78,7 +108,8 @@ public class SimpleTextStreamHandler {
             addRequest.setMessageType(messageTypeEnum.getValue());
             chatHistoryService.addChatHistory(addRequest, loginUser);
         } catch (Exception e) {
-            log.error("保存对话历史失败: appId={}, type={}, error={}", appId, messageTypeEnum.getText(), e.getMessage());
+            log.error("保存对话历史失败: appId={}, type={}, reason={}", appId, messageTypeEnum.getText(),
+                    e.getClass().getSimpleName());
         }
     }
 }

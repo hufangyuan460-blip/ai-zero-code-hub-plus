@@ -9,6 +9,7 @@ import com.swu.aiZeroCodeHub.service.ChatHistoryService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 
 import java.util.Map;
@@ -33,6 +34,9 @@ public class WorkflowGenerationStrategy implements GenerationStrategy {
                 request,
                 context -> saveFinalHistory(request, context, historySaved));
         return workflowEvents.onErrorResume(error -> {
+            if (Exceptions.unwrap(error) instanceof GenerationCancelledException) {
+                return Flux.error(error);
+            }
             if (historySaved.compareAndSet(false, true)) {
                 saveHistory(request, buildFailureSummary(error), ChatHistoryMessageTypeEnum.AI);
             }
@@ -68,7 +72,8 @@ public class WorkflowGenerationStrategy implements GenerationStrategy {
             historyRequest.setContent(content);
             chatHistoryService.addChatHistory(historyRequest, request.loginUser());
         } catch (Exception e) {
-            log.error("保存工作流对话历史失败，appId={}, error={}", request.appId(), e.getMessage());
+            log.error("保存工作流对话历史失败，appId={}, 类型={}", request.appId(),
+                    e.getClass().getSimpleName());
         }
     }
 

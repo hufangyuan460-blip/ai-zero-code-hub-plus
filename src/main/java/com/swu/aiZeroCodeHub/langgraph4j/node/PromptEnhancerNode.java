@@ -22,6 +22,7 @@ public class PromptEnhancerNode {
     public static AsyncNodeAction<MessagesState<String>> create() {
         return node_async(state -> {
             WorkflowContext context = WorkflowContext.getContext(state);
+            context.throwIfCancellationRequested();
             log.info("执行节点: 提示词增强");
             WorkflowEventSupport.stepStarted(context, "提示词增强");
             // 获取原始提示词和图片列表
@@ -50,6 +51,7 @@ public class PromptEnhancerNode {
                 }
             }
             String enhancedPrompt = enhancedPromptBuilder.toString();
+            context.throwIfCancellationRequested();
             // 更新状态
             context.setCurrentStep("提示词增强");
             context.setEnhancedPrompt(enhancedPrompt);

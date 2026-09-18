@@ -4,6 +4,7 @@ import cn.hutool.json.JSONUtil;
 import com.swu.aiZeroCodeHub.model.dto.chathistory.ChatHistoryAddRequest;
 import com.swu.aiZeroCodeHub.model.entity.User;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
+import com.swu.aiZeroCodeHub.generation.GenerationCancelledException;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 import reactor.core.publisher.Flux;
@@ -11,10 +12,12 @@ import reactor.core.publisher.Flux;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import org.mockito.ArgumentCaptor;
 
 class StreamHandlerHistoryLimitTest {
@@ -60,6 +63,17 @@ class StreamHandlerHistoryLimitTest {
         assertTrue(!history.contains("FULL_SOURCE_CONTENT"));
         assertTrue(!history.contains("OLD_SOURCE_CONTENT"));
         assertTrue(!history.contains("NEW_SOURCE_CONTENT"));
+    }
+
+    @Test
+    void cancellationDoesNotWriteAFalseAiFailureMessage() {
+        ChatHistoryService historyService = mock(ChatHistoryService.class);
+        SimpleTextStreamHandler handler = new SimpleTextStreamHandler();
+
+        assertThrows(GenerationCancelledException.class, () -> handler.handle(
+                Flux.error(new GenerationCancelledException()), historyService, 8003L, user()).blockLast());
+
+        verifyNoInteractions(historyService);
     }
 
     private User user() {

@@ -70,6 +70,46 @@ export interface AppDeployRequest {
   appId: string
 }
 
+export type ExecutionMode = 'DIRECT' | 'WORKFLOW'
+export type GenerationRunStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT'
+
+export interface GenerationCreateRequest {
+  appId: string | number
+  userMessage: string
+  codeGenType?: string
+  executionMode?: ExecutionMode
+}
+
+export interface GenerationCreateResponse {
+  runId: string
+  status: GenerationRunStatus
+}
+
+export interface GenerationRunStatusResponse {
+  runId: string
+  appId: string | number
+  userId: string | number
+  executionMode: ExecutionMode
+  status: GenerationRunStatus
+  currentStep?: string
+  startedAt?: string
+  updatedAt?: string
+  finishedAt?: string
+  errorMessage?: string
+  retryCount?: number
+  maxRetryCount?: number
+  cancelRequested?: boolean
+  validationFingerprint?: string | null
+  artifactHash?: string | null
+  changedFiles?: string[]
+  validationIssueCount?: number
+  llmCallCount?: number
+  toolCallCount?: number
+  buildCallCount?: number
+  repairAttempt?: number
+  maxRepairAttempts?: number
+}
+
 // API Methods
 
 /**
@@ -176,4 +216,30 @@ export const deployApp = async (data: AppDeployRequest) => {
 export const getDownloadLink = async (appId: string | number) => {
   const res = await request.get<any>(`/app/download/link/${appId}`)
   return unwrapBaseResponse<string>(res)
+}
+
+/** Create a server-side generation run. The server assigns runId. */
+export const createGeneration = async (data: GenerationCreateRequest) => {
+  const res = await request.post<any>('/app/generation', data)
+  return unwrapBaseResponse<GenerationCreateResponse>(res)
+}
+
+/** Query a run without re-executing it. */
+export const getGeneration = async (runId: string) => {
+  const res = await request.get<any>(`/app/generation/${encodeURIComponent(runId)}`)
+  return unwrapBaseResponse<GenerationRunStatusResponse>(res)
+}
+
+/** SSE endpoint for a previously created run. */
+export const generationStreamUrl = (runId: string, afterSequence = 0) => {
+  const suffix = afterSequence > 0 ? `?afterSequence=${encodeURIComponent(String(afterSequence))}` : ''
+  return `/api/app/generation/stream/${encodeURIComponent(runId)}${suffix}`
+}
+
+/**
+ * Request cooperative cancellation of a server-side generation run.
+ */
+export const cancelGeneration = async (runId: string) => {
+  const res = await request.post<any>(`/app/generation/cancel/${encodeURIComponent(runId)}`)
+  return unwrapBaseResponse<boolean>(res)
 }

@@ -1,7 +1,6 @@
 package com.swu.aiZeroCodeHub.core.streamHandler;
 
 
-import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
@@ -14,6 +13,7 @@ import com.swu.aiZeroCodeHub.model.message.StreamMessage;
 import com.swu.aiZeroCodeHub.model.message.ToolExecutedMessage;
 import com.swu.aiZeroCodeHub.model.message.ToolRequestMessage;
 import com.swu.aiZeroCodeHub.service.ChatHistoryService;
+import com.swu.aiZeroCodeHub.generation.GenerationCancelledException;
 import com.swu.aiZeroCodeHub.manager.ToolManager;
 import com.swu.aiZeroCodeHub.aiTool.AiTool;
 import jakarta.annotation.Resource;
@@ -26,6 +26,7 @@ import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 /**
  * JSON 消息流处理器
@@ -54,16 +55,37 @@ public class JsonMessageStreamHandler {
                                ChatHistoryService chatHistoryService,
                                Long appId,
                                User loginUser) {
+        return handle(originFlux, chatHistoryService, appId, loginUser, () -> false);
+    }
+
+    public Flux<String> handle(Flux<String> originFlux,
+                               ChatHistoryService chatHistoryService,
+                               Long appId,
+                               User loginUser,
+                               BooleanSupplier cancellationChecker) {
+        return handle(originFlux, chatHistoryService, appId, loginUser, cancellationChecker, () -> true);
+    }
+
+    public Flux<String> handle(Flux<String> originFlux,
+                               ChatHistoryService chatHistoryService,
+                               Long appId,
+                               User loginUser,
+                               BooleanSupplier cancellationChecker,
+                               BooleanSupplier toolBudgetChecker) {
         // 收集数据用于生成后端记忆格式
         HistoryContentAccumulator historyAccumulator = new HistoryContentAccumulator();
         Set<String> seenToolIds = new HashSet<>();
 
         return originFlux
                 .flatMap(chunk -> {
+                    throwIfCancelled(cancellationChecker);
                     // 使用SSE解析器处理
                     List<String> jsonMessages = sseParser.parseSSE(chunk);
                     return Flux.fromIterable(jsonMessages)
-                            .map(json -> handleJsonMessageChunk(json, historyAccumulator, seenToolIds))
+                            .map(json -> {
+                                throwIfCancelled(cancellationChecker);
+                                return handleJsonMessageChunk(json, historyAccumulator, seenToolIds, toolBudgetChecker);
+                            })
                             .filter(StrUtil::isNotEmpty);
                 })
                 .doOnComplete(() -> {
@@ -74,10 +96,19 @@ public class JsonMessageStreamHandler {
                     }
                 })
                 .doOnError(error -> {
-                    log.error("处理SSE流失败", error);
+                    if (error instanceof GenerationCancelledException) {
+                        return;
+                    }
+                    log.error("处理SSE流失败，类型={}", error.getClass().getSimpleName());
                     saveChatHistory(appId, "AI回复失败: " + error.getMessage(),
                             ChatHistoryMessageTypeEnum.AI, loginUser,chatHistoryService);
                 });
+    }
+
+    private void throwIfCancelled(BooleanSupplier cancellationChecker) {
+        if (cancellationChecker != null && cancellationChecker.getAsBoolean()) {
+            throw new com.swu.aiZeroCodeHub.generation.GenerationCancelledException();
+        }
     }
 
     /**
@@ -85,7 +116,8 @@ public class JsonMessageStreamHandler {
      */
     private String handleJsonMessageChunk(String chunk,
                                           HistoryContentAccumulator historyAccumulator,
-                                          Set<String> seenToolIds) {
+                                          Set<String> seenToolIds,
+                                          BooleanSupplier toolBudgetChecker) {
         // 解析 JSON
         StreamMessage streamMessage = JSONUtil.toBean(chunk, StreamMessage.class);
         StreamMessageTypeEnum typeEnum = StreamMessageTypeEnum.getEnumByValue(streamMessage.getType());
@@ -140,39 +172,28 @@ public class JsonMessageStreamHandler {
                 }
             }
             case TOOL_EXECUTED -> {
+                if (toolBudgetChecker != null && !toolBudgetChecker.getAsBoolean()) {
+                    throw new com.swu.aiZeroCodeHub.exception.BusinessException(
+                            com.swu.aiZeroCodeHub.exception.ErrorCode.OPERATION_ERROR, "工具调用预算已用尽");
+                }
                 ToolExecutedMessage toolExecutedMessage = JSONUtil.toBean(chunk, ToolExecutedMessage.class);
                 JSONObject jsonObject = StrUtil.isBlank(toolExecutedMessage.getArguments())
                         ? JSONUtil.createObj()
                         : JSONUtil.parseObj(toolExecutedMessage.getArguments());
                 
-                // 尝试解析不同工具的参数
+                // 仅解析路径字段；content、oldContent、newContent 永不进入前端事件或历史。
                 String toolName = toolExecutedMessage.getName();
-                String content = "";
                 String path = "";
-                String suffix = "";
                 
                 if (jsonObject.containsKey("relativeFilePath")) {
                     path = jsonObject.getStr("relativeFilePath");
-                    suffix = FileUtil.getSuffix(path);
                 } else if (jsonObject.containsKey("relativeDirPath")) {
                     path = jsonObject.getStr("relativeDirPath");
                 }
                 
-                if (jsonObject.containsKey("content")) {
-                    content = jsonObject.getStr("content");
-                } else if (jsonObject.containsKey("oldContent") && jsonObject.containsKey("newContent")) {
-                    // 修改文件工具
-                    content = "Old:\n" + jsonObject.getStr("oldContent") + "\n\nNew:\n" + jsonObject.getStr("newContent");
-                }
-                
                 String result = "";
                 if ("writeFile".equals(toolName) || "modifyFile".equals(toolName)) {
-                     result = String.format("""
-                        [工具调用] %s %s
-                        ```%s
-                        %s
-                        ```
-                        """, toolName, path, suffix, content);
+                     result = String.format("[工具调用] %s %s", toolName, path);
                 } else if ("readFile".equals(toolName)) {
                      result = String.format("[工具调用] 读取文件 %s", path);
                 } else if ("deleteFile".equals(toolName)) {
@@ -180,11 +201,10 @@ public class JsonMessageStreamHandler {
                 } else if ("getProjectFileTree".equals(toolName)) {
                      result = String.format("[工具调用] 获取目录结构 %s", path);
                 } else {
-                     // 默认展示给前端，历史记录不复用完整参数
-                     result = String.format("[工具调用] %s %s", toolName, jsonObject.toString());
+                     result = String.format("[工具调用] %s", toolName);
                 }
 
-                // 前端可以继续展示代码内容，但持久化历史只保留工具摘要
+                // 前端和历史都只展示工具名称及目标路径，不暴露完整工具参数。
                 String output = String.format("\n\n%s\n\n", result);
                 return output;
             }
@@ -211,7 +231,8 @@ public class JsonMessageStreamHandler {
             addRequest.setMessageType(messageTypeEnum.getValue());
             chatHistoryService.addChatHistory(addRequest, loginUser);
         } catch (Exception e) {
-            log.error("保存对话历史失败: appId={}, type={}, error={}", appId, messageTypeEnum.getText(), e.getMessage());
+            log.error("保存对话历史失败: appId={}, type={}, reason={}", appId, messageTypeEnum.getText(),
+                    e.getClass().getSimpleName());
         }
     }
 }

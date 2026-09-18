@@ -26,6 +26,7 @@ public final class WorkflowEventSupport {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("step", step);
         data.put("status", status);
+        data.put("message", status);
         data.put("repairAttempt", context.getRepairAttempt());
         return data;
     }

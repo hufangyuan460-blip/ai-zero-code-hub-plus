@@ -27,6 +27,8 @@ import static dev.langchain4j.internal.ValidationUtils.ensureNotNull;
 @Internal
 public class AiServiceTokenStream implements TokenStream {
 
+    private static final int MAX_TEMPORARY_MEMORY_MESSAGES = 20;
+
     private final List<ChatMessage> messages;
     private final List<ToolSpecification> toolSpecifications;
     private final Map<String, ToolExecutor> toolExecutors;
@@ -181,7 +183,7 @@ public class AiServiceTokenStream implements TokenStream {
     }
 
     private ChatMemory initTemporaryMemory(AiServiceContext context, List<ChatMessage> messagesToSend) {
-        var chatMemory = MessageWindowChatMemory.withMaxMessages(Integer.MAX_VALUE);
+        var chatMemory = MessageWindowChatMemory.withMaxMessages(MAX_TEMPORARY_MEMORY_MESSAGES);
 
         if (!context.hasChatMemory()) {
             chatMemory.add(messagesToSend);

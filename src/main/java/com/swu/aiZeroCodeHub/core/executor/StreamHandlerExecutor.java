@@ -10,6 +10,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
+import java.util.function.BooleanSupplier;
+
 import static com.swu.aiZeroCodeHub.model.enums.CodeGenTypeEnum.MULTI_FILE;
 
 /**
@@ -39,13 +41,35 @@ public class StreamHandlerExecutor {
                                   long appId,
                                   User loginUser,
                                   CodeGenTypeEnum codeGenType) {
+        return doExecute(originFlux, chatHistoryService, appId, loginUser, codeGenType, () -> false);
+    }
+
+    public Flux<String> doExecute(Flux<String> originFlux,
+                                  ChatHistoryService chatHistoryService,
+                                  long appId,
+                                  User loginUser,
+                                  CodeGenTypeEnum codeGenType,
+                                  BooleanSupplier cancellationChecker) {
+        return doExecute(originFlux, chatHistoryService, appId, loginUser, codeGenType,
+                cancellationChecker, () -> true);
+    }
+
+    public Flux<String> doExecute(Flux<String> originFlux,
+                                  ChatHistoryService chatHistoryService,
+                                  long appId,
+                                  User loginUser,
+                                  CodeGenTypeEnum codeGenType,
+                                  BooleanSupplier cancellationChecker,
+                                  BooleanSupplier toolBudgetChecker) {
         return switch (codeGenType) {
             case VUE_PROJECT ->
                 // 使用注入的组件实例
-                    jsonMessageStreamHandler.handle(originFlux, chatHistoryService, appId, loginUser);
+                    jsonMessageStreamHandler.handle(originFlux, chatHistoryService, appId, loginUser,
+                            cancellationChecker, toolBudgetChecker);
             case HTML, MULTI_FILE ->
                 // 简单文本处理器不需要依赖注入
-                    new SimpleTextStreamHandler().handle(originFlux, chatHistoryService, appId, loginUser);
+                    new SimpleTextStreamHandler().handle(originFlux, chatHistoryService, appId, loginUser,
+                            cancellationChecker, toolBudgetChecker);
         };
     }
 }

@@ -25,6 +25,21 @@ server:
   servlet:
     context-path: /api
 
+agent:
+  generation:
+    direct-timeout: 10m
+    workflow-timeout: 20m
+    workflow-node-timeout: 10m
+    max-retry-count: 2
+    max-repair-attempts: 1
+    max-llm-calls: 2
+    max-tool-calls: 20
+    artifact-retention: 24h
+    remote-build-enabled: false
+    remote-build-url: ${AGENT_REMOTE_BUILD_URL:}
+    generation-rate: 1
+    generation-rate-window: 5s
+
 
 springdoc:
   group-configs:
